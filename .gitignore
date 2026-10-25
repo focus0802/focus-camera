@@ -1,0 +1,24 @@
+# macOS / Windows OS metadata
+.DS_Store
+Thumbs.db
+
+# Local build outputs & native bundles
+dist/
+*.exe
+*.app/
+*.old
+*.bak
+*.new.tmp
+
+# Local runtime configurations & sensitive credentials (NEVER commit)
+cameras.json
+config.json
+updates/
+
+# Local video recordings
+recordings/
+*.mp4
+
+# Frontend dependencies
+web-ui/node_modules/
+web-ui/.vite/
