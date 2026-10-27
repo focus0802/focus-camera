@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release tag version (e.g. v2.0.1)"
+        description: "Release tag version (e.g. v2.2.0)"
         required: true
-        default: "v2.0.0"
+        default: "v2.2.0"
 
 permissions:
   contents: write
@@ -81,7 +81,7 @@ jobs:
           {
             "version": "${RELEASE_VERSION}",
             "published_at": "${PUB_DATE}",
-            "notes": "FocusCamera ${RELEASE_VERSION} 正式版：\n1. 支持多路 1080P + PCMA 音频 MP4 自动/手动录制与本地回放\n2. 支持 :8800 双向语音对讲与局域网摄像头一键扫描发现\n3. 内置 SHA-256 完整性校验与受控一键安全热升级",
+            "notes": "FocusCamera ${RELEASE_VERSION} 沉浸式桌面顶栏、系统托盘静默录制与全能云台升级版：\n1. 双端沉浸式一体化顶栏：macOS（左上原生红绿灯）与 Windows（右上自定义最小化/最大化/关闭按钮）视觉统一，支持拖拽移动、双击最大化与深浅主题联动\n2. 系统托盘后台静默常驻：关闭主窗口时弹出 @uiarc/dialog 确认框，支持最小化至 Windows 右下角系统托盘 / macOS 右上角菜单栏托盘，后台 1080P 录像不中断\n3. 高屏占比一屏监控墙：监控卡片升级为画面底部渐变浮层 HUD，全览模式自适应视口网格高度，26+ 路画面一屏完整显示无滚动条\n4. 全平台专属高清图标：内置 macOS AppIcon.icns 与 Windows PE rsrc_windows_amd64.syso 多图层图标资源\n5. 物理云台控制、多品牌 ONVIF 扫描与机身静态 IP 直接修改，并修复带元数据轨摄像头的电流杂音问题",
             "assets": {
               "darwin_arm64": {
                 "url": "FocusCamera-Mac",
