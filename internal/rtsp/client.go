@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"focus-camera/internal/config"
-	"focus-camera/internal/discovery"
 )
 
 const (
@@ -85,7 +84,7 @@ func (h *StreamHub) Subscribe(camID string, streamType string, wantAudio bool) (
 	h.mu.Lock()
 	cs, exists := h.streams[key]
 	if !exists {
-		cs = newCameraStream(cam, streamType, func() {
+		cs = newCameraStream(h.store, cam, streamType, func() {
 			h.mu.Lock()
 			delete(h.streams, key)
 			h.mu.Unlock()
@@ -148,6 +147,7 @@ func (h *StreamHub) GetActiveStats() map[string]StreamStats {
 }
 
 type cameraStream struct {
+	store      *config.Store
 	cam        config.Camera
 	streamType string
 	onShutdown func()
@@ -164,8 +164,9 @@ type cameraStream struct {
 	stopped     bool
 }
 
-func newCameraStream(cam config.Camera, streamType string, onShutdown func()) *cameraStream {
+func newCameraStream(store *config.Store, cam config.Camera, streamType string, onShutdown func()) *cameraStream {
 	return &cameraStream{
+		store:      store,
 		cam:        cam,
 		streamType: streamType,
 		onShutdown: onShutdown,
@@ -184,6 +185,45 @@ func (cs *cameraStream) stopIfIdle() (chan struct{}, bool) {
 		return cs.doneCh, true
 	}
 	return nil, false
+}
+
+func (cs *cameraStream) forceStop() chan struct{} {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if !cs.stopped {
+		cs.stopped = true
+		close(cs.stopCh)
+		return cs.doneCh
+	}
+	return nil
+}
+
+// CloseCamera immediately terminates active RTSP sessions for a camera ID (e.g. before hardware IP change).
+func (h *StreamHub) CloseCamera(camID string) {
+	if camID == "" {
+		return
+	}
+	h.mu.Lock()
+	var waitChs []chan struct{}
+	for _, st := range []string{"main", "sub"} {
+		key := camID + ":" + st
+		if cs, ok := h.streams[key]; ok {
+			delete(h.streams, key)
+			if ch := cs.forceStop(); ch != nil {
+				waitChs = append(waitChs, ch)
+			}
+		}
+	}
+	h.mu.Unlock()
+
+	deadline := time.After(800 * time.Millisecond)
+	for _, ch := range waitChs {
+		select {
+		case <-ch:
+		case <-deadline:
+			return
+		}
+	}
 }
 
 func (cs *cameraStream) addSubscriber(wantAudio bool) *Subscriber {
@@ -412,6 +452,11 @@ func md5Hex(s string) string {
 }
 
 func buildDigestAuth(method, uri, wwwAuth, user, pass string) string {
+	upper := strings.ToUpper(strings.TrimSpace(wwwAuth))
+	if strings.HasPrefix(upper, "BASIC") {
+		cred := base64.StdEncoding.EncodeToString([]byte(user + ":" + pass))
+		return "Basic " + cred
+	}
 	realm := extractAttr(wwwAuth, "realm")
 	nonce := extractAttr(wwwAuth, "nonce")
 	if realm == "" || nonce == "" {
@@ -464,16 +509,111 @@ func buildAVCCPacket(sps, pps []byte) []byte {
 	return out
 }
 
+func stripEmulationPrevention(nalu []byte) []byte {
+	out := make([]byte, 0, len(nalu))
+	for i := 0; i < len(nalu); i++ {
+		if i+2 < len(nalu) && nalu[i] == 0x00 && nalu[i+1] == 0x00 && nalu[i+2] == 0x03 {
+			out = append(out, 0x00, 0x00)
+			i += 2
+			continue
+		}
+		out = append(out, nalu[i])
+	}
+	return out
+}
+
+// buildHVCCPacket constructs an ISO/IEC 14496-15 HEVCDecoderConfigurationRecord
+// prefixed with [MsgTypeCodecConfig, 0xFF, 'H', '5'].
+func buildHVCCPacket(vps, sps, pps []byte) []byte {
+	if len(sps) < 4 || len(pps) == 0 {
+		return nil
+	}
+	// Default Main Profile, Level 4.0 (120)
+	var ptl [12]byte
+	ptl[0] = 0x01 // general_profile_idc = 1 (Main)
+	ptl[1] = 0x60 // general_profile_compatibility_flags
+	ptl[5] = 0x90 // general_constraint_indicator_flags
+	ptl[11] = 120 // general_level_idc = 120 (Level 4.0)
+
+	if len(vps) >= 6 {
+		rbsp := stripEmulationPrevention(vps)
+		// In HEVC VPS RBSP: 2B NAL header + 4B VPS header (vps_id/layers/temp_id_nesting/0xffff) + 12B profile_tier_level
+		if len(rbsp) >= 18 {
+			copy(ptl[:], rbsp[6:18])
+		}
+	}
+
+	var hvcc bytes.Buffer
+	hvcc.WriteByte(0x01)    // configurationVersion = 1
+	hvcc.Write(ptl[:])      // 12 bytes profile_tier_level
+	hvcc.Write([]byte{0xF0, 0x00}) // min_spatial_segmentation_idc = 0
+	hvcc.WriteByte(0xFC)    // parallelismType = 0
+	hvcc.WriteByte(0xFD)    // chromaFormat = 1 (4:2:0)
+	hvcc.WriteByte(0xF8)    // bitDepthLumaMinus8 = 0
+	hvcc.WriteByte(0xF8)    // bitDepthChromaMinus8 = 0
+	hvcc.Write([]byte{0x00, 0x00}) // avgFrameRate = 0
+	hvcc.WriteByte(0x0F)    // constantFrameRate=0, numTemporalLayers=1, temporalIdNested=1, lengthSizeMinusOne=3
+
+	arrays := 0
+	if len(vps) > 0 {
+		arrays++
+	}
+	if len(sps) > 0 {
+		arrays++
+	}
+	if len(pps) > 0 {
+		arrays++
+	}
+	hvcc.WriteByte(byte(arrays))
+
+	writeArray := func(nalType byte, nalu []byte) {
+		if len(nalu) == 0 {
+			return
+		}
+		hvcc.WriteByte(0x80 | (nalType & 0x3F)) // array_completeness=1 | NAL_unit_type
+		_ = binary.Write(&hvcc, binary.BigEndian, uint16(1))
+		_ = binary.Write(&hvcc, binary.BigEndian, uint16(len(nalu)))
+		hvcc.Write(nalu)
+	}
+	writeArray(32, vps)
+	writeArray(33, sps)
+	writeArray(34, pps)
+
+	hvccBytes := hvcc.Bytes()
+	out := make([]byte, 4+len(hvccBytes))
+	out[0] = MsgTypeCodecConfig
+	out[1] = 0xFF
+	out[2] = 'H'
+	out[3] = '5'
+	copy(out[4:], hvccBytes)
+	return out
+}
+
+func formatRTSPURI(ip string, port int, streamPath string) string {
+	sp := strings.TrimSpace(streamPath)
+	if strings.HasPrefix(strings.ToLower(sp), "rtsp://") {
+		return sp
+	}
+	if !strings.HasPrefix(sp, "/") {
+		sp = "/" + sp
+	}
+	return fmt.Sprintf("rtsp://%s:%d%s", ip, port, sp)
+}
+
 func (cs *cameraStream) streamOnce() error {
+	if cs.store != nil {
+		if latest, ok := cs.store.GetCamera(cs.cam.ID); ok {
+			cs.mu.Lock()
+			cs.cam = latest
+			cs.mu.Unlock()
+		}
+	}
 	port := cs.cam.RTSPPort
 	if port == 0 {
 		port = 554
 	}
-	streamPath := "stream2"
-	if cs.streamType == "main" {
-		streamPath = "stream1"
-	}
-	baseURI := fmt.Sprintf("rtsp://%s:%d/%s", cs.cam.IP, port, streamPath)
+	streamPath := cs.cam.ResolveStreamPath(cs.streamType)
+	baseURI := formatRTSPURI(cs.cam.IP, port, streamPath)
 
 	releaseHandshake := paceRTSPHandshake()
 	handshakeReleased := false
@@ -605,17 +745,38 @@ func (cs *cameraStream) streamOnce() error {
 		if err != nil {
 			return err
 		}
+		if code == 401 && cs.cam.Password != "" {
+			// Fallback: camera might have an empty password while a global default password is set
+			cs.cam.Password = ""
+			if h2, ok := hdrs["www-authenticate"]; ok && h2 != "" {
+				wwwAuth = h2
+			}
+			code, hdrs, sdpBytes, err = sendRTSP("DESCRIBE", baseURI, map[string]string{"Accept": "application/sdp"})
+			if err != nil {
+				return err
+			}
+		}
+	}
+	// If sub-stream path returned 404 on a single-stream camera, automatically fall back to main stream path
+	if code == 404 && cs.streamType != "main" {
+		mainURI := formatRTSPURI(cs.cam.IP, port, cs.cam.ResolveStreamPath("main"))
+		if mainURI != baseURI {
+			baseURI = mainURI
+			code, hdrs, sdpBytes, err = sendRTSP("DESCRIBE", baseURI, map[string]string{"Accept": "application/sdp"})
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if code == 401 {
+		return fmt.Errorf("RTSP 密码鉴权失败 (401)，请在设备管理中核对该摄像头密码")
 	}
 	if code != 200 {
 		return fmt.Errorf("RTSP DESCRIBE 返回 %d", code)
 	}
 
-	// Self-heal if camera main/sub stream was set to H.265/HEVC instead of H.264
 	sdpUpper := strings.ToUpper(string(sdpBytes))
-	if strings.Contains(sdpUpper, "H265") || strings.Contains(sdpUpper, "HEVC") {
-		_ = discovery.EnsureH264Video(cs.cam.IP, cs.cam.Username, cs.cam.Password)
-		return fmt.Errorf("检测到 H.265 编码，已自动切换为 H.264，正在重连")
-	}
+	isHEVC := strings.Contains(sdpUpper, "H265") || strings.Contains(sdpUpper, "HEVC")
 
 	contentBase := hdrs["content-base"]
 	if contentBase == "" {
@@ -625,12 +786,28 @@ func (cs *cameraStream) streamOnce() error {
 		contentBase += "/"
 	}
 
-	// Parse SDP for sprop-parameter-sets and track control names
-	var sps, pps []byte
+	// Parse SDP for sprop-parameter-sets (H.264) / sprop-vps,sprop-sps,sprop-pps (H.265) and track control names
+	var vps, sps, pps []byte
 	videoTrack := "track1"
 	audioTrack := "track2"
 	hasAudio := false
 	currentMedia := ""
+
+	extractFmtpParam := func(line, key string) []byte {
+		idx := strings.Index(line, key+"=")
+		if idx < 0 {
+			return nil
+		}
+		val := line[idx+len(key)+1:]
+		if semi := strings.Index(val, ";"); semi >= 0 {
+			val = val[:semi]
+		}
+		if comma := strings.Index(val, ","); comma >= 0 {
+			val = val[:comma]
+		}
+		b, _ := base64.StdEncoding.DecodeString(strings.TrimSpace(val))
+		return b
+	}
 
 	for _, line := range strings.Split(string(sdpBytes), "\n") {
 		line = strings.TrimSpace(line)
@@ -640,6 +817,8 @@ func (cs *cameraStream) streamOnce() error {
 		case strings.HasPrefix(line, "m=audio"):
 			currentMedia = "audio"
 			hasAudio = true
+		case strings.HasPrefix(line, "m="):
+			currentMedia = "other"
 		case strings.HasPrefix(line, "a=control:"):
 			ctrl := strings.TrimPrefix(line, "a=control:")
 			if ctrl != "*" {
@@ -649,16 +828,33 @@ func (cs *cameraStream) streamOnce() error {
 					audioTrack = ctrl
 				}
 			}
-		case strings.HasPrefix(line, "a=fmtp:") && strings.Contains(line, "sprop-parameter-sets="):
-			idx := strings.Index(line, "sprop-parameter-sets=")
-			sprop := line[idx+len("sprop-parameter-sets="):]
-			if semi := strings.Index(sprop, ";"); semi >= 0 {
-				sprop = sprop[:semi]
+		case strings.HasPrefix(line, "a=fmtp:"):
+			if currentMedia != "video" {
+				continue
 			}
-			spParts := strings.Split(sprop, ",")
-			if len(spParts) >= 2 {
-				sps, _ = base64.StdEncoding.DecodeString(strings.TrimSpace(spParts[0]))
-				pps, _ = base64.StdEncoding.DecodeString(strings.TrimSpace(spParts[1]))
+			if strings.Contains(line, "sprop-parameter-sets=") {
+				idx := strings.Index(line, "sprop-parameter-sets=")
+				sprop := line[idx+len("sprop-parameter-sets="):]
+				if semi := strings.Index(sprop, ";"); semi >= 0 {
+					sprop = sprop[:semi]
+				}
+				spParts := strings.Split(sprop, ",")
+				if len(spParts) >= 2 {
+					sps, _ = base64.StdEncoding.DecodeString(strings.TrimSpace(spParts[0]))
+					pps, _ = base64.StdEncoding.DecodeString(strings.TrimSpace(spParts[1]))
+				}
+			}
+			if b := extractFmtpParam(line, "sprop-vps"); len(b) > 0 {
+				vps = b
+				isHEVC = true
+			}
+			if b := extractFmtpParam(line, "sprop-sps"); len(b) > 0 {
+				sps = b
+				isHEVC = true
+			}
+			if b := extractFmtpParam(line, "sprop-pps"); len(b) > 0 {
+				pps = b
+				isHEVC = true
 			}
 		}
 	}
@@ -717,10 +913,17 @@ func (cs *cameraStream) streamOnce() error {
 		}
 	}()
 
+	buildConfigPacket := func() []byte {
+		if isHEVC {
+			return buildHVCCPacket(vps, sps, pps)
+		}
+		return buildAVCCPacket(sps, pps)
+	}
+
 	var curConfigPkt []byte
 	configDirty := false
 	if len(sps) >= 4 && len(pps) > 0 {
-		curConfigPkt = buildAVCCPacket(sps, pps)
+		curConfigPkt = buildConfigPacket()
 		cs.mu.Lock()
 		cs.codecConfig = curConfigPkt
 		for _, sub := range cs.subs {
@@ -734,7 +937,7 @@ func (cs *cameraStream) streamOnce() error {
 
 	cs.broadcastStatus("online", "")
 
-	// Assemble state for H.264 RTP
+	// Assemble state for H.264 / H.265 RTP
 	var (
 		fuBuffer      bytes.Buffer
 		fuActive      bool
@@ -750,6 +953,46 @@ func (cs *cameraStream) streamOnce() error {
 		if len(nalu) == 0 {
 			return
 		}
+		if isHEVC {
+			if len(nalu) < 2 {
+				return
+			}
+			nalType := (nalu[0] >> 1) & 0x3F
+			switch {
+			case nalType == 32: // VPS
+				if !bytes.Equal(vps, nalu) {
+					vps = append([]byte(nil), nalu...)
+					configDirty = true
+				}
+			case nalType == 33: // SPS
+				if !bytes.Equal(sps, nalu) {
+					sps = append([]byte(nil), nalu...)
+					configDirty = true
+				}
+			case nalType == 34: // PPS
+				if !bytes.Equal(pps, nalu) {
+					pps = append([]byte(nil), nalu...)
+					configDirty = true
+				}
+			case nalType >= 16 && nalType <= 21: // BLA / IDR / CRA Keyframe slice
+				auHasKeyframe = true
+				auHasVCL = true
+				var lenBuf [4]byte
+				binary.BigEndian.PutUint32(lenBuf[:], uint32(len(nalu)))
+				auBuffer.Write(lenBuf[:])
+				auBuffer.Write(nalu)
+			case nalType <= 9 || nalType == 39 || nalType == 40: // Non-IDR VCL slice or Prefix/Suffix SEI
+				if nalType <= 9 {
+					auHasVCL = true
+				}
+				var lenBuf [4]byte
+				binary.BigEndian.PutUint32(lenBuf[:], uint32(len(nalu)))
+				auBuffer.Write(lenBuf[:])
+				auBuffer.Write(nalu)
+			}
+			return
+		}
+
 		nalType := nalu[0] & 0x1F
 		switch nalType {
 		case 7: // SPS
@@ -789,11 +1032,11 @@ func (cs *cameraStream) streamOnce() error {
 		}
 		var newCfg []byte
 		if configDirty && len(sps) >= 4 && len(pps) > 0 {
-			newCfg = buildAVCCPacket(sps, pps)
+			newCfg = buildConfigPacket()
 			curConfigPkt = newCfg
 			configDirty = false
 		}
-		// Build MsgTypeVideoFrame: [0x02, isKey(1/0), ts_ms(4B), ...AVCC NALUs...]
+		// Build MsgTypeVideoFrame: [0x02, isKey(1/0), ts_ms(4B), ...length-prefixed NALUs...]
 		pkt := make([]byte, 6+auBuffer.Len())
 		pkt[0] = MsgTypeVideoFrame
 		if auHasKeyframe {
@@ -928,7 +1171,7 @@ func (cs *cameraStream) streamOnce() error {
 			continue
 		}
 
-		// Channel 0: Video H.264 RTP
+		// Channel 0: Video H.264 / H.265 RTP
 		if hasRTPTime && rtpTS != lastRTPTime && auHasVCL {
 			flushAccessUnit(lastRTPTime)
 		}
@@ -936,44 +1179,85 @@ func (cs *cameraStream) streamOnce() error {
 		hasRTPTime = true
 
 		nal0 := payload[0]
-		if len(payload) >= 3 && ((nal0 == 0x42 && payload[1] == 0x01) || (nal0 == 0x62 && payload[1] == 0x01)) {
-			_ = discovery.EnsureH264Video(cs.cam.IP, cs.cam.Username, cs.cam.Password)
-			return fmt.Errorf("检测到 H.265 编码，已自动切换为 H.264，正在重连")
+		if !isHEVC && len(payload) >= 3 && ((nal0 == 0x40 && payload[1] == 0x01) || (nal0 == 0x42 && payload[1] == 0x01) || (nal0 == 0x62 && payload[1] == 0x01)) {
+			isHEVC = true
 		}
-		nalType := nal0 & 0x1F
 
-		switch {
-		case nalType >= 1 && nalType <= 23:
-			appendNALU(payload)
-		case nalType == 24: // STAP-A
-			p := payload[1:]
-			for len(p) >= 2 {
-				sz := int(binary.BigEndian.Uint16(p[:2]))
-				p = p[2:]
-				if sz > len(p) {
-					break
-				}
-				appendNALU(p[:sz])
-				p = p[sz:]
+		if isHEVC {
+			if len(payload) < 2 {
+				continue
 			}
-		case nalType == 28 && len(payload) >= 2: // FU-A
-			fuIndicator := payload[0]
-			fuHeader := payload[1]
-			startBit := (fuHeader & 0x80) != 0
-			endBit := (fuHeader & 0x40) != 0
-			origType := fuHeader & 0x1F
+			hevcType := (nal0 >> 1) & 0x3F
+			switch {
+			case hevcType <= 47: // Single NALU
+				appendNALU(payload)
+			case hevcType == 48 && len(payload) > 2: // AP (Aggregation Packet)
+				p := payload[2:]
+				for len(p) >= 2 {
+					sz := int(binary.BigEndian.Uint16(p[:2]))
+					p = p[2:]
+					if sz > len(p) {
+						break
+					}
+					appendNALU(p[:sz])
+					p = p[sz:]
+				}
+			case hevcType == 49 && len(payload) >= 3: // FU (Fragmentation Unit)
+				fuHeader := payload[2]
+				startBit := (fuHeader & 0x80) != 0
+				endBit := (fuHeader & 0x40) != 0
+				origType := fuHeader & 0x3F
 
-			if startBit {
-				fuBuffer.Reset()
-				fuBuffer.WriteByte((fuIndicator & 0xE0) | origType)
-				fuBuffer.Write(payload[2:])
-				fuActive = true
-			} else if fuActive {
-				fuBuffer.Write(payload[2:])
-				if endBit {
-					appendNALU(fuBuffer.Bytes())
+				if startBit {
 					fuBuffer.Reset()
-					fuActive = false
+					fuBuffer.WriteByte((payload[0] & 0x81) | (origType << 1))
+					fuBuffer.WriteByte(payload[1])
+					fuBuffer.Write(payload[3:])
+					fuActive = true
+				} else if fuActive {
+					fuBuffer.Write(payload[3:])
+					if endBit {
+						appendNALU(fuBuffer.Bytes())
+						fuBuffer.Reset()
+						fuActive = false
+					}
+				}
+			}
+		} else {
+			nalType := nal0 & 0x1F
+			switch {
+			case nalType >= 1 && nalType <= 23:
+				appendNALU(payload)
+			case nalType == 24: // STAP-A
+				p := payload[1:]
+				for len(p) >= 2 {
+					sz := int(binary.BigEndian.Uint16(p[:2]))
+					p = p[2:]
+					if sz > len(p) {
+						break
+					}
+					appendNALU(p[:sz])
+					p = p[sz:]
+				}
+			case nalType == 28 && len(payload) >= 2: // FU-A
+				fuIndicator := payload[0]
+				fuHeader := payload[1]
+				startBit := (fuHeader & 0x80) != 0
+				endBit := (fuHeader & 0x40) != 0
+				origType := fuHeader & 0x1F
+
+				if startBit {
+					fuBuffer.Reset()
+					fuBuffer.WriteByte((fuIndicator & 0xE0) | origType)
+					fuBuffer.Write(payload[2:])
+					fuActive = true
+				} else if fuActive {
+					fuBuffer.Write(payload[2:])
+					if endBit {
+						appendNALU(fuBuffer.Bytes())
+						fuBuffer.Reset()
+						fuActive = false
+					}
 				}
 			}
 		}

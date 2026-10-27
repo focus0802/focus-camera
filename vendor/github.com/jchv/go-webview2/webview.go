@@ -4,9 +4,11 @@
 package webview2
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"log"
+	"math"
 	"reflect"
 	"strconv"
 	"sync"
@@ -53,6 +55,8 @@ type webview struct {
 	autofocus  bool
 	maxsz      w32.Point
 	minsz      w32.Point
+	icon       uintptr
+	trayAdded  bool
 	m          sync.Mutex
 	bindings   map[string]interface{}
 	dispatchq  []func()
@@ -145,6 +149,11 @@ func (w *webview) msgcb(msg string) {
 		return
 	}
 
+	if d.ID <= 0 {
+		_, _ = w.callbinding(d)
+		return
+	}
+
 	id := strconv.Itoa(d.ID)
 	if res, err := w.callbinding(d); err != nil {
 		w.Dispatch(func() {
@@ -222,6 +231,20 @@ func (w *webview) callbinding(d rpcMessage) (interface{}, error) {
 }
 
 func wndproc(hwnd, msg, wp, lp uintptr) uintptr {
+	if msg == w32.WMNCCalcSize && wp != 0 {
+		rgrc := (*w32.Rect)(unsafe.Pointer(lp))
+		origTop := rgrc.Top
+		r, _, _ := w32.User32DefWindowProcW.Call(hwnd, msg, wp, lp)
+		zoomed, _, _ := w32.User32IsZoomed.Call(hwnd)
+		if zoomed != 0 {
+			frameY, _, _ := w32.User32GetSystemMetrics.Call(w32.SM_CYSIZEFRAME)
+			padY, _, _ := w32.User32GetSystemMetrics.Call(w32.SM_CXPADDEDBORDER)
+			rgrc.Top = origTop + int32(frameY+padY)
+		} else {
+			rgrc.Top = origTop
+		}
+		return r
+	}
 	if w, ok := getWindowContext(hwnd).(*webview); ok {
 		switch msg {
 		case w32.WMMove, w32.WMMoving:
@@ -232,6 +255,11 @@ func wndproc(hwnd, msg, wp, lp uintptr) uintptr {
 			return r
 		case w32.WMSize:
 			w.browser.Resize()
+			if wp == 2 {
+				w.browser.Eval("document.documentElement.dataset.windowMaximized = 'true';")
+			} else if wp == 0 {
+				w.browser.Eval("document.documentElement.dataset.windowMaximized = 'false';")
+			}
 		case w32.WMActivate:
 			if wp == w32.WAInactive {
 				break
@@ -240,22 +268,18 @@ func wndproc(hwnd, msg, wp, lp uintptr) uintptr {
 				w.browser.Focus()
 			}
 		case w32.WMClose:
-			msgText, _ := windows.UTF16PtrFromString("退出软件将停止后台所有正在进行的 1080P 自动录像。\n\n• 点击【是 (Y)】：保存分片并彻底退出软件\n• 点击【否 (N)】：最小化到任务栏并在后台继续录像\n• 点击【取消】：留在当前监控界面")
-			msgTitle, _ := windows.UTF16PtrFromString("Focus Camera · 后台录像防误关保护")
-			// MB_YESNOCANCEL (0x03) | MB_ICONQUESTION (0x20) | MB_DEFBUTTON2 (0x100)
-			ret, _, _ := w32.User32MessageBoxW.Call(
-				hwnd,
-				uintptr(unsafe.Pointer(msgText)),
-				uintptr(unsafe.Pointer(msgTitle)),
-				0x00000123,
-			)
-			if ret == 6 { // IDYES: Quit
-				_, _, _ = w32.User32DestroyWindow.Call(hwnd)
-			} else if ret == 7 { // IDNO: Minimize and keep recording
-				_, _, _ = w32.User32ShowWindow.Call(hwnd, w32.SWMinimize)
+			w.browser.Eval("window.dispatchEvent(new CustomEvent('focus-request-close'));")
+			return 0
+		case w32.WMTrayIcon:
+			switch lp {
+			case w32.WMLButtonUp, w32.WMLButtonDblClk, w32.NINBalloonClick:
+				w.RestoreFromTray()
+			case w32.WMRButtonUp:
+				w.showTrayContextMenu()
 			}
 			return 0
 		case w32.WMDestroy:
+			w.RemoveTrayIcon()
 			w.Terminate()
 		case w32.WMGetMinMaxInfo:
 			lpmmi := (*w32.MinMaxInfo)(unsafe.Pointer(lp))
@@ -287,15 +311,21 @@ func (w *webview) CreateWithOptions(opts WindowOptions) bool {
 	_ = windows.GetModuleHandleEx(0, nil, &hinstance)
 
 	var icon uintptr
-	if opts.IconId == 0 {
-		// load default icon
+	if opts.IconId != 0 {
+		icon, _, _ = w32.User32LoadImageW.Call(uintptr(hinstance), uintptr(opts.IconId), 1, 0, 0, w32.LR_DEFAULTSIZE|w32.LR_SHARED)
+	}
+	if icon == 0 {
+		icon, _, _ = w32.User32LoadImageW.Call(uintptr(hinstance), 1, 1, 0, 0, w32.LR_DEFAULTSIZE|w32.LR_SHARED)
+	}
+	if icon == 0 {
+		icon = createFocusCameraIconHandle()
+	}
+	if icon == 0 {
 		icow, _, _ := w32.User32GetSystemMetrics.Call(w32.SystemMetricsCxIcon)
 		icoh, _, _ := w32.User32GetSystemMetrics.Call(w32.SystemMetricsCyIcon)
 		icon, _, _ = w32.User32LoadImageW.Call(uintptr(hinstance), 32512, icow, icoh, 0)
-	} else {
-		// load icon from resource
-		icon, _, _ = w32.User32LoadImageW.Call(uintptr(hinstance), uintptr(opts.IconId), 1, 0, 0, w32.LR_DEFAULTSIZE|w32.LR_SHARED)
 	}
+	w.icon = icon
 
 	className, _ := windows.UTF16PtrFromString("webview")
 	wc := w32.WndClassExW{
@@ -348,6 +378,11 @@ func (w *webview) CreateWithOptions(opts WindowOptions) bool {
 		0,
 	)
 	setWindowContext(w.hwnd, w)
+	if w.icon != 0 {
+		_, _, _ = w32.User32SendMessageW.Call(w.hwnd, w32.WMSetIcon, 1 /* ICON_BIG */, w.icon)
+		_, _, _ = w32.User32SendMessageW.Call(w.hwnd, w32.WMSetIcon, 0 /* ICON_SMALL */, w.icon)
+	}
+	w.initTrayIcon()
 
 	_, _, _ = w32.User32ShowWindow.Call(w.hwnd, w32.SWShow)
 	_, _, _ = w32.User32UpdateWindow.Call(w.hwnd)
@@ -497,4 +532,202 @@ func (w *webview) Bind(name string, f interface{}) error {
 	})()`)
 
 	return nil
+}
+
+func copyUTF16(dst []uint16, s string) {
+	u, err := windows.UTF16FromString(s)
+	if err != nil {
+		return
+	}
+	copy(dst, u)
+}
+
+func (w *webview) initTrayIcon() {
+	if w.hwnd == 0 || w.trayAdded {
+		return
+	}
+	var nid w32.NotifyIconDataW
+	nid.CbSize = uint32(unsafe.Sizeof(nid))
+	nid.Hwnd = w.hwnd
+	nid.UID = 1
+	nid.UFlags = w32.NIFMessage | w32.NIFIcon | w32.NIFTip
+	nid.UCallbackMessage = w32.WMTrayIcon
+	nid.HIcon = w.icon
+	copyUTF16(nid.SzTip[:], "FocusCamera · 高清监控与 NVR 中心（后台运行中）")
+	ret, _, _ := w32.Shell32ShellNotifyIconW.Call(w32.NIMAdd, uintptr(unsafe.Pointer(&nid)))
+	if ret != 0 {
+		w.trayAdded = true
+	}
+}
+
+func (w *webview) MinimizeToTray() {
+	if w.hwnd == 0 {
+		return
+	}
+	if !w.trayAdded {
+		w.initTrayIcon()
+	}
+	_, _, _ = w32.User32ShowWindow.Call(w.hwnd, w32.SWHide)
+	if w.trayAdded {
+		var nid w32.NotifyIconDataW
+		nid.CbSize = uint32(unsafe.Sizeof(nid))
+		nid.Hwnd = w.hwnd
+		nid.UID = 1
+		nid.UFlags = w32.NIFInfo
+		nid.DwInfoFlags = w32.NIIFInfo
+		copyUTF16(nid.SzInfoTitle[:], "FocusCamera 已转入系统托盘运行")
+		copyUTF16(nid.SzInfo[:], "后台 1080P 自动录像仍在持续进行，点击右下角托盘图标即可恢复主窗口。")
+		_, _, _ = w32.Shell32ShellNotifyIconW.Call(w32.NIMModify, uintptr(unsafe.Pointer(&nid)))
+	}
+}
+
+func (w *webview) RestoreFromTray() {
+	if w.hwnd == 0 {
+		return
+	}
+	_, _, _ = w32.User32ShowWindow.Call(w.hwnd, w32.SWShow)
+	zoomed, _, _ := w32.User32IsZoomed.Call(w.hwnd)
+	if zoomed == 0 {
+		_, _, _ = w32.User32ShowWindow.Call(w.hwnd, w32.SWRestore)
+	}
+	_, _, _ = w32.User32SetForegroundWindow.Call(w.hwnd)
+	_, _, _ = w32.User32SetFocus.Call(w.hwnd)
+	w.browser.Resize()
+	w.browser.Focus()
+}
+
+func (w *webview) RemoveTrayIcon() {
+	if w.hwnd == 0 || !w.trayAdded {
+		return
+	}
+	var nid w32.NotifyIconDataW
+	nid.CbSize = uint32(unsafe.Sizeof(nid))
+	nid.Hwnd = w.hwnd
+	nid.UID = 1
+	_, _, _ = w32.Shell32ShellNotifyIconW.Call(w32.NIMDelete, uintptr(unsafe.Pointer(&nid)))
+	w.trayAdded = false
+}
+
+func (w *webview) showTrayContextMenu() {
+	hMenu, _, _ := w32.User32CreatePopupMenu.Call()
+	if hMenu == 0 {
+		return
+	}
+	defer w32.User32DestroyMenu.Call(hMenu)
+
+	openLabel, _ := windows.UTF16PtrFromString("打开 FocusCamera 监控主界面")
+	statusLabel, _ := windows.UTF16PtrFromString("状态：后台 1080P 自动录像运行中")
+	quitLabel, _ := windows.UTF16PtrFromString("彻底退出并停止录像...")
+
+	_, _, _ = w32.User32AppendMenuW.Call(hMenu, 0x0000 /* MF_STRING */, 1001, uintptr(unsafe.Pointer(openLabel)))
+	_, _, _ = w32.User32AppendMenuW.Call(hMenu, 0x0800 /* MF_SEPARATOR */, 0, 0)
+	_, _, _ = w32.User32AppendMenuW.Call(hMenu, 0x0001 /* MF_GRAYED */, 0, uintptr(unsafe.Pointer(statusLabel)))
+	_, _, _ = w32.User32AppendMenuW.Call(hMenu, 0x0800 /* MF_SEPARATOR */, 0, 0)
+	_, _, _ = w32.User32AppendMenuW.Call(hMenu, 0x0000 /* MF_STRING */, 1002, uintptr(unsafe.Pointer(quitLabel)))
+
+	var pt w32.Point
+	_, _, _ = w32.User32GetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
+	_, _, _ = w32.User32SetForegroundWindow.Call(w.hwnd)
+	// TPM_RETURNCMD (0x0100) | TPM_NONOTIFY (0x0080) | TPM_RIGHTBUTTON (0x0002)
+	cmd, _, _ := w32.User32TrackPopupMenu.Call(hMenu, 0x0182, uintptr(pt.X), uintptr(pt.Y), 0, w.hwnd, 0)
+	if cmd == 1001 {
+		w.RestoreFromTray()
+	} else if cmd == 1002 {
+		w.RestoreFromTray()
+		w.browser.Eval("window.dispatchEvent(new CustomEvent('focus-request-close'));")
+	}
+}
+
+func createFocusCameraIconHandle() uintptr {
+	const size = 64
+	const headerSize = 40
+	const xorSize = size * size * 4
+	const andSize = size * (size / 8)
+	buf := make([]byte, headerSize+xorSize+andSize)
+
+	// BITMAPINFOHEADER
+	binary.LittleEndian.PutUint32(buf[0:4], headerSize)
+	binary.LittleEndian.PutUint32(buf[4:8], uint32(size))
+	binary.LittleEndian.PutUint32(buf[8:12], uint32(size*2))
+	binary.LittleEndian.PutUint16(buf[12:14], 1)
+	binary.LittleEndian.PutUint16(buf[14:16], 32)
+	binary.LittleEndian.PutUint32(buf[20:24], uint32(xorSize))
+
+	setPixel := func(x, y int, r, g, b, a uint8) {
+		// DIB is bottom-up
+		row := (size - 1 - y)
+		off := headerSize + (row*size+x)*4
+		buf[off+0] = b
+		buf[off+1] = g
+		buf[off+2] = r
+		buf[off+3] = a
+	}
+
+	roundedRectDist := func(px, py, cx, cy, halfW, halfH, rad float64) float64 {
+		dx := math.Abs(px-cx) - (halfW - rad)
+		dy := math.Abs(py-cy) - (halfH - rad)
+		ox := math.Max(dx, 0)
+		oy := math.Max(dy, 0)
+		return math.Hypot(ox, oy) + math.Min(math.Max(dx, dy), 0) - rad
+	}
+
+	for y := 0; y < size; y++ {
+		for x := 0; x < size; x++ {
+			fx := float64(x) + 0.5
+			fy := float64(y) + 0.5
+
+			// Squircle background
+			bgDist := roundedRectDist(fx, fy, 32.0, 32.0, 28.0, 28.0, 14.0)
+			if bgDist > 0.7 {
+				continue
+			}
+			alpha := 1.0
+			if bgDist > -0.7 {
+				alpha = (0.7 - bgDist) / 1.4
+			}
+
+			r, g, b := 16.0, 23.0, 38.0
+			if bgDist > -2.0 {
+				// Subtle slate border
+				r, g, b = 46.0, 68.0, 104.0
+			}
+
+			// Camera lens center distance
+			lensDist := math.Hypot(fx-32.0, fy-32.0)
+			if lensDist <= 18.5 {
+				if lensDist >= 14.5 {
+					// Azure outer lens ring
+					r, g, b = 61.0, 140.0, 245.0
+				} else if lensDist >= 11.5 {
+					r, g, b = 26.0, 42.0, 68.0
+				} else {
+					// Inner glass iris
+					r, g, b = 34.0, 96.0, 204.0
+					glintDist := math.Hypot(fx-27.5, fy-27.5)
+					if glintDist <= 3.5 {
+						r, g, b = 215.0, 236.0, 255.0
+					}
+				}
+			}
+
+			// Top-right REC indicator dot
+			recDist := math.Hypot(fx-48.5, fy-15.5)
+			if recDist <= 5.5 {
+				r, g, b = 242.0, 61.0, 71.0
+			}
+
+			setPixel(x, y, uint8(r), uint8(g), uint8(b), uint8(alpha*255.0))
+		}
+	}
+
+	hIcon, _, _ := w32.User32CreateIconFromResourceEx.Call(
+		uintptr(unsafe.Pointer(&buf[0])),
+		uintptr(len(buf)),
+		1,
+		0x00030000,
+		size,
+		size,
+		0,
+	)
+	return hIcon
 }

@@ -93,7 +93,7 @@ func TestEndToEndControlledUpgrade(t *testing.T) {
 	sumHex := hex.EncodeToString(sum[:])
 
 	mf := Manifest{
-		Version:     "v2.1.0",
+		Version:     "v9.9.0",
 		PublishedAt: "2026-10-25",
 		Notes:       "1. 新增受控一键热更新\n2. 升级前自动刷盘所有 1080P MP4 录像",
 		Assets: map[string]AssetInfo{
@@ -118,7 +118,7 @@ func TestEndToEndControlledUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Check failed: %v", err)
 	}
-	if !st.HasUpdate || st.State != "available" || st.LatestVersion != "v2.1.0" {
+	if !st.HasUpdate || st.State != "available" || st.LatestVersion != "v9.9.0" {
 		t.Fatalf("unexpected status after Check: %+v", st)
 	}
 

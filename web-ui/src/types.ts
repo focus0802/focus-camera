@@ -1,3 +1,29 @@
+export interface PTZPreset {
+  id: string;
+  name: string;
+  hw_token?: string;
+  zoom?: number;
+  pan_x?: number;
+  pan_y?: number;
+  hardware?: boolean;
+}
+
+export interface DigitalViewState {
+  zoom: number;
+  panX: number;
+  panY: number;
+}
+
+export type PTZDirection =
+  | "up"
+  | "down"
+  | "left"
+  | "right"
+  | "up_left"
+  | "up_right"
+  | "down_left"
+  | "down_right";
+
 export interface Camera {
   id: string;
   name: string;
@@ -5,11 +31,43 @@ export interface Camera {
   group: string;
   username?: string;
   password?: string;
+  no_password?: boolean;
+  vendor?: string;
+  main_stream_path?: string;
+  sub_stream_path?: string;
+  model?: string;
+  flip_type?: string;
+  ptz_invert_x?: boolean;
+  ptz_invert_y?: boolean;
   rtsp_port?: number;
   talk_port?: number;
+  supports_talk?: boolean;
+  supports_ptz?: boolean;
+  ptz_presets?: PTZPreset[];
   sub_stream?: boolean;
   auto_record?: boolean;
   sort_order?: number;
+}
+
+export interface CameraNetworkConfig {
+  proto: "static" | "dhcp";
+  ipaddr: string;
+  netmask: string;
+  gateway: string;
+  mac?: string;
+  dns?: string;
+}
+
+export function cameraSupportsTalk(camera?: Camera | null): boolean {
+  if (!camera) return false;
+  if (camera.supports_talk === true || camera.talk_port === 8800) {
+    return true;
+  }
+  if (typeof camera.supports_talk === "boolean") {
+    return camera.supports_talk;
+  }
+  const v = (camera.vendor || "").toLowerCase();
+  return v === "" || v === "tplink" || v === "mercury";
 }
 
 export interface DiscoveredCamera {
@@ -18,6 +76,11 @@ export interface DiscoveredCamera {
   rtsp_open: boolean;
   talk_open: boolean;
   http_open: boolean;
+  vendor?: string;
+  main_stream_path?: string;
+  sub_stream_path?: string;
+  supports_talk?: boolean;
+  supports_ptz?: boolean;
   device_model: string;
   hardware_ver: string;
   firmware_ver: string;
@@ -26,6 +89,8 @@ export interface DiscoveredCamera {
   suggested_name: string;
   suggested_group: string;
   auth_ok: boolean;
+  password?: string;
+  no_password?: boolean;
   error?: string;
   status: "new" | "existing" | "ip_shifted";
   existing_id?: string;

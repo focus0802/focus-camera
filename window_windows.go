@@ -7,11 +7,58 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"unsafe"
 
 	"github.com/jchv/go-webview2"
 	"github.com/jchv/go-webview2/webviewloader"
 	"golang.org/x/sys/windows"
 )
+
+var (
+	dwmapi                           = windows.NewLazySystemDLL("dwmapi.dll")
+	procDwmSetWindowAttr             = dwmapi.NewProc("DwmSetWindowAttribute")
+	procDwmExtendFrameIntoClientArea = dwmapi.NewProc("DwmExtendFrameIntoClientArea")
+
+	user32             = windows.NewLazySystemDLL("user32.dll")
+	procShowWindow     = user32.NewProc("ShowWindow")
+	procIsZoomed       = user32.NewProc("IsZoomed")
+	procPostMessageW   = user32.NewProc("PostMessageW")
+	procReleaseCapture = user32.NewProc("ReleaseCapture")
+)
+
+type dwmMargins struct {
+	CxLeftWidth    int32
+	CxRightWidth   int32
+	CyTopHeight    int32
+	CyBottomHeight int32
+}
+
+func applyWindowsImmersiveTheme(hwnd uintptr, dark bool) {
+	if hwnd == 0 {
+		return
+	}
+	if procDwmExtendFrameIntoClientArea.Find() == nil {
+		margins := dwmMargins{CxLeftWidth: 0, CxRightWidth: 0, CyTopHeight: 1, CyBottomHeight: 0}
+		_, _, _ = procDwmExtendFrameIntoClientArea.Call(hwnd, uintptr(unsafe.Pointer(&margins)))
+	}
+	if procDwmSetWindowAttr.Find() != nil {
+		return
+	}
+	var darkMode int32
+	var captionColor uint32 = 0x00FFFFFF // BGR: #FFFFFF
+	var textColor uint32 = 0x001A1A1A    // BGR: #1A1A1A
+	if dark {
+		darkMode = 1
+		captionColor = 0x001A1A1A // BGR: #1A1A1A matching --surface dark
+		textColor = 0x00F2F2F2    // BGR: #F2F2F2
+	}
+	// DWMWA_USE_IMMERSIVE_DARK_MODE (20 for Win10 20H1+ & Win11, 19 for older Win10)
+	_, _, _ = procDwmSetWindowAttr.Call(hwnd, 20, uintptr(unsafe.Pointer(&darkMode)), unsafe.Sizeof(darkMode))
+	_, _, _ = procDwmSetWindowAttr.Call(hwnd, 19, uintptr(unsafe.Pointer(&darkMode)), unsafe.Sizeof(darkMode))
+	// Windows 11 DWMWA_CAPTION_COLOR (35) & DWMWA_TEXT_COLOR (36)
+	_, _, _ = procDwmSetWindowAttr.Call(hwnd, 35, uintptr(unsafe.Pointer(&captionColor)), unsafe.Sizeof(captionColor))
+	_, _, _ = procDwmSetWindowAttr.Call(hwnd, 36, uintptr(unsafe.Pointer(&textColor)), unsafe.Sizeof(textColor))
+}
 
 func runNativeDesktopWindow(appURL string) {
 	localAppData := os.Getenv("LOCALAPPDATA")
@@ -45,14 +92,49 @@ func runNativeDesktopWindow(appURL string) {
 			AutoFocus: true,
 			DataPath:  dataPath,
 			WindowOptions: webview2.WindowOptions{
-				Title:  "Focus Camera · 29路教室高清监控与双向对讲系统",
+				Title:  "Focus Camera · 高清监控与 NVR 中心",
 				Width:  1640,
 				Height: 960,
+				IconId: 1,
 				Center: true,
 			},
 		})
 		if w != nil {
 			defer w.Destroy()
+			hwnd := uintptr(w.Window())
+			applyWindowsImmersiveTheme(hwnd, true)
+			w.Init("window.__FOCUS_PLATFORM__ = 'windows';")
+			_ = w.Bind("focusSyncWindowTheme", func(theme string) {
+				w.Dispatch(func() {
+					applyWindowsImmersiveTheme(hwnd, theme != "light")
+				})
+			})
+			_ = w.Bind("focusWindowControl", func(action string) {
+				w.Dispatch(func() {
+					switch action {
+					case "drag":
+						_, _, _ = procReleaseCapture.Call()
+						_, _, _ = procPostMessageW.Call(hwnd, 0x00A1 /* WM_NCLBUTTONDOWN */, 2 /* HTCAPTION */, 0)
+					case "minimize":
+						_, _, _ = procShowWindow.Call(hwnd, 6 /* SW_MINIMIZE */)
+					case "tray":
+						w.MinimizeToTray()
+					case "remove-tray":
+						w.RemoveTrayIcon()
+					case "maximize":
+						zoomed, _, _ := procIsZoomed.Call(hwnd)
+						if zoomed != 0 {
+							_, _, _ = procShowWindow.Call(hwnd, 9 /* SW_RESTORE */)
+							w.Eval("document.documentElement.dataset.windowMaximized = 'false';")
+						} else {
+							_, _, _ = procShowWindow.Call(hwnd, 3 /* SW_MAXIMIZE */)
+							w.Eval("document.documentElement.dataset.windowMaximized = 'true';")
+						}
+					case "close":
+						w.Eval("window.dispatchEvent(new CustomEvent('focus-request-close'));")
+					}
+				})
+			})
 			w.SetSize(1640, 960, webview2.HintNone)
 			w.Navigate(appURL)
 			w.Run()

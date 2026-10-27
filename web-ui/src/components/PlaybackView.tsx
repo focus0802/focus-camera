@@ -312,7 +312,7 @@ export function PlaybackView({
   const columns: DataColumn<TableRowItem>[] = [
     {
       key: "camera_name",
-      label: "房间 / 日期",
+      label: "设备 / 日期",
       sortable: true,
       width: "22%",
       render: (_val, row) => (
@@ -450,7 +450,7 @@ export function PlaybackView({
                 items={cameraSelectItems}
                 value={selectedCameraId || "all"}
                 onValueChange={(val) => onSelectCameraId(val === "all" ? "" : val)}
-                searchPlaceholder="搜索房号或 IP…"
+                searchPlaceholder="搜索设备名称或 IP…"
                 panelWidth={264}
                 maxListHeight={280}
               />
@@ -580,7 +580,7 @@ export function PlaybackView({
           <EmptyState
             icon={<Video width={24} height={24} strokeWidth={1.6} />}
             title="当前筛选条件下暂无录像分片"
-            description="您可以在「实时监控」页面点击任意琴房画面下方的「录像」按钮立即录制，或者开启「全部自动录像」由后台按固定时长自动归档 1080P 高清带音频 MP4。"
+            description="您可以在「实时监控」页面点击任意画面下方的「录像」按钮立即录制，或者开启「全部自动录像」由后台按固定时长自动归档 1080P 高清带音频 MP4。"
             action={
               <Button variant="primary" size="md" onClick={handleRefresh}>
                 重新扫描本地录像库
@@ -601,7 +601,7 @@ export function PlaybackView({
                 </h3>
                 <p>
                   {activeSegment
-                    ? `1080P H.264 + 8000Hz 音频 · 时长 ${formatDuration(
+                    ? `1080P H.264/H.265 + 8000Hz 音频 · 时长 ${formatDuration(
                         activeSegment.duration_sec
                       )} · 大小 ${formatBytes(activeSegment.size_bytes)}`
                     : "支持 0.5x ~ 8x 倍速回放与一键导出 MP4"}
@@ -807,7 +807,7 @@ export function PlaybackView({
                   label="搜索录像分片"
                   value={keyword}
                   onValueChange={setKeyword}
-                  placeholder="搜琴房或时间 (如 15号 / 10:22)…"
+                  placeholder="搜设备名称或时间 (如 前台 / 10:22)…"
                 />
               </div>
             </div>

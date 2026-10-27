@@ -18,38 +18,53 @@ var (
 	shlwapi                  = windows.NewLazySystemDLL("shlwapi")
 	shlwapiSHCreateMemStream = shlwapi.NewProc("SHCreateMemStream")
 
-	user32                   = windows.NewLazySystemDLL("user32")
-	User32LoadImageW         = user32.NewProc("LoadImageW")
-	User32GetSystemMetrics   = user32.NewProc("GetSystemMetrics")
-	User32RegisterClassExW   = user32.NewProc("RegisterClassExW")
-	User32CreateWindowExW    = user32.NewProc("CreateWindowExW")
-	User32DestroyWindow      = user32.NewProc("DestroyWindow")
-	User32ShowWindow         = user32.NewProc("ShowWindow")
-	User32UpdateWindow       = user32.NewProc("UpdateWindow")
-	User32SetFocus           = user32.NewProc("SetFocus")
-	User32GetMessageW        = user32.NewProc("GetMessageW")
-	User32TranslateMessage   = user32.NewProc("TranslateMessage")
-	User32DispatchMessageW   = user32.NewProc("DispatchMessageW")
-	User32DefWindowProcW     = user32.NewProc("DefWindowProcW")
-	User32GetClientRect      = user32.NewProc("GetClientRect")
-	User32PostQuitMessage    = user32.NewProc("PostQuitMessage")
-	User32PostMessageW       = user32.NewProc("PostMessageW")
-	User32SetWindowTextW     = user32.NewProc("SetWindowTextW")
-	User32PostThreadMessageW = user32.NewProc("PostThreadMessageW")
-	User32GetWindowLongW     = user32.NewProc("GetWindowLongW")
-	User32GetWindowLongPtrW  = user32.NewProc("GetWindowLongPtrW")
-	User32SetWindowLongW     = user32.NewProc("SetWindowLongW")
-	User32SetWindowLongPtrW  = user32.NewProc("SetWindowLongPtrW")
-	User32AdjustWindowRect   = user32.NewProc("AdjustWindowRect")
-	User32SetWindowPos       = user32.NewProc("SetWindowPos")
-	User32IsDialogMessage    = user32.NewProc("IsDialogMessage")
-	User32GetAncestor        = user32.NewProc("GetAncestor")
-	User32MessageBoxW        = user32.NewProc("MessageBoxW")
+	shell32                 = windows.NewLazySystemDLL("shell32")
+	Shell32ShellNotifyIconW = shell32.NewProc("Shell_NotifyIconW")
+
+	user32                         = windows.NewLazySystemDLL("user32")
+	User32LoadImageW               = user32.NewProc("LoadImageW")
+	User32GetSystemMetrics         = user32.NewProc("GetSystemMetrics")
+	User32RegisterClassExW         = user32.NewProc("RegisterClassExW")
+	User32CreateWindowExW          = user32.NewProc("CreateWindowExW")
+	User32DestroyWindow            = user32.NewProc("DestroyWindow")
+	User32ShowWindow               = user32.NewProc("ShowWindow")
+	User32UpdateWindow             = user32.NewProc("UpdateWindow")
+	User32SetFocus                 = user32.NewProc("SetFocus")
+	User32SetForegroundWindow      = user32.NewProc("SetForegroundWindow")
+	User32GetMessageW              = user32.NewProc("GetMessageW")
+	User32TranslateMessage         = user32.NewProc("TranslateMessage")
+	User32DispatchMessageW         = user32.NewProc("DispatchMessageW")
+	User32DefWindowProcW           = user32.NewProc("DefWindowProcW")
+	User32GetClientRect            = user32.NewProc("GetClientRect")
+	User32PostQuitMessage          = user32.NewProc("PostQuitMessage")
+	User32PostMessageW             = user32.NewProc("PostMessageW")
+	User32SendMessageW             = user32.NewProc("SendMessageW")
+	User32SetWindowTextW           = user32.NewProc("SetWindowTextW")
+	User32PostThreadMessageW       = user32.NewProc("PostThreadMessageW")
+	User32GetWindowLongW           = user32.NewProc("GetWindowLongW")
+	User32GetWindowLongPtrW        = user32.NewProc("GetWindowLongPtrW")
+	User32SetWindowLongW           = user32.NewProc("SetWindowLongW")
+	User32SetWindowLongPtrW        = user32.NewProc("SetWindowLongPtrW")
+	User32AdjustWindowRect         = user32.NewProc("AdjustWindowRect")
+	User32SetWindowPos             = user32.NewProc("SetWindowPos")
+	User32IsDialogMessage          = user32.NewProc("IsDialogMessage")
+	User32GetAncestor              = user32.NewProc("GetAncestor")
+	User32MessageBoxW              = user32.NewProc("MessageBoxW")
+	User32IsZoomed                 = user32.NewProc("IsZoomed")
+	User32ReleaseCapture           = user32.NewProc("ReleaseCapture")
+	User32GetCursorPos             = user32.NewProc("GetCursorPos")
+	User32CreatePopupMenu          = user32.NewProc("CreatePopupMenu")
+	User32AppendMenuW              = user32.NewProc("AppendMenuW")
+	User32TrackPopupMenu           = user32.NewProc("TrackPopupMenu")
+	User32DestroyMenu              = user32.NewProc("DestroyMenu")
+	User32CreateIconFromResourceEx = user32.NewProc("CreateIconFromResourceEx")
 )
 
 const (
-	SM_CXSCREEN = 0
-	SM_CYSCREEN = 1
+	SM_CXSCREEN       = 0
+	SM_CYSCREEN       = 1
+	SM_CYSIZEFRAME    = 33
+	SM_CXPADDEDBORDER = 92
 )
 
 const (
@@ -74,8 +89,11 @@ const (
 )
 
 const (
+	SWHide     = 0
+	SWMaximize = 3
 	SWShow     = 5
 	SWMinimize = 6
+	SWRestore  = 9
 )
 
 const (
@@ -93,10 +111,48 @@ const (
 	WMClose         = 0x0010
 	WMQuit          = 0x0012
 	WMGetMinMaxInfo = 0x0024
+	WMSetIcon       = 0x0080
+	WMNCCalcSize    = 0x0083
 	WMNCLButtonDown = 0x00A1
+	WMLButtonUp     = 0x0202
+	WMLButtonDblClk = 0x0203
+	WMRButtonUp     = 0x0205
 	WMMoving        = 0x0216
 	WMApp           = 0x8000
+	WMTrayIcon      = 0x8001
+	NINBalloonClick = 0x0405
 )
+
+const (
+	NIMAdd    = 0x00000000
+	NIMModify = 0x00000001
+	NIMDelete = 0x00000002
+
+	NIFMessage = 0x00000001
+	NIFIcon    = 0x00000002
+	NIFTip     = 0x00000004
+	NIFInfo    = 0x00000010
+
+	NIIFInfo = 0x00000001
+)
+
+type NotifyIconDataW struct {
+	CbSize           uint32
+	Hwnd             uintptr
+	UID              uint32
+	UFlags           uint32
+	UCallbackMessage uint32
+	HIcon            uintptr
+	SzTip            [128]uint16
+	DwState          uint32
+	DwStateMask      uint32
+	SzInfo           [256]uint16
+	UVersion         uint32
+	SzInfoTitle      [64]uint16
+	DwInfoFlags      uint32
+	GuidItem         [16]byte
+	HBalloonIcon     uintptr
+}
 
 const (
 	GAParent    = 1

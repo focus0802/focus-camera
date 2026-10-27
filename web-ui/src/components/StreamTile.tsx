@@ -20,7 +20,11 @@ import {
   type Variants,
 } from "motion/react";
 import { motionTokens } from "./arc/lib/motion-tokens";
-import type { Camera, RecordingState } from "../types";
+import {
+  cameraSupportsTalk,
+  type Camera,
+  type RecordingState,
+} from "../types";
 import { RoomAudioPlayer } from "../lib/audio";
 
 /** Same settle spring & rolling digit variants as @uiarc/reorderable-list */
@@ -75,6 +79,39 @@ interface StreamTileProps {
 
 function hex2(b: number): string {
   return b.toString(16).padStart(2, "0");
+}
+
+function reverseBits32(v: number): number {
+  let out = 0;
+  for (let i = 0; i < 32; i++) {
+    out = (out << 1) | ((v >>> i) & 1);
+  }
+  return out >>> 0;
+}
+
+function buildHEVCCodecString(hvcc: Uint8Array): string {
+  if (hvcc.byteLength < 13) {
+    return "hvc1.1.6.L120.90";
+  }
+  const spaceTierProfile = hvcc[1];
+  const profileSpace = (spaceTierProfile >> 6) & 0x03;
+  const tierFlag = (spaceTierProfile >> 5) & 0x01;
+  const profileIdc = spaceTierProfile & 0x1f || 1;
+  const spacePrefix = ["", "A", "B", "C"][profileSpace] ?? "";
+  const compatRaw =
+    ((hvcc[2] << 24) | (hvcc[3] << 16) | (hvcc[4] << 8) | hvcc[5]) >>> 0;
+  const compatHex = (reverseBits32(compatRaw) || 6).toString(16).toUpperCase();
+  const tierChar = tierFlag ? "H" : "L";
+  const levelIdc = hvcc[12] || 120;
+
+  const constraints: string[] = [];
+  for (let i = 6; i <= 11; i++) {
+    constraints.push(hvcc[i].toString(16).toUpperCase().padStart(2, "0"));
+  }
+  while (constraints.length > 1 && constraints[constraints.length - 1] === "00") {
+    constraints.pop();
+  }
+  return `hvc1.${spacePrefix}${profileIdc}.${compatHex}.${tierChar}${levelIdc}.${constraints.join(".")}`;
 }
 
 export function StreamTile({
@@ -154,6 +191,8 @@ export function StreamTile({
   const [hasFrame, setHasFrame] = useState<boolean>(false);
   const [rebooting, setRebooting] = useState<boolean>(false);
   const [reloadNonce, setReloadNonce] = useState<number>(0);
+  const audioEnabledRef = useRef<boolean>(audioEnabled);
+  audioEnabledRef.current = audioEnabled;
 
   useEffect(() => {
     if (!audioPlayerRef.current) {
@@ -268,8 +307,11 @@ export function StreamTile({
         });
       } catch {
         try {
+          const altCodec = codecStr.startsWith("hvc1.")
+            ? codecStr.replace(/^hvc1\./, "hev1.")
+            : codecStr;
           decoder.configure({
-            codec: codecStr,
+            codec: altCodec,
             description: avccDescription,
             optimizeForLatency: true,
           });
@@ -285,7 +327,7 @@ export function StreamTile({
       const streamParam = stream === "stream1" ? "main" : "sub";
       const wsUrl = `${proto}//${window.location.host}/ws/stream?id=${encodeURIComponent(
         camera.id
-      )}&stream=${streamParam}&audio=${audioEnabled ? "1" : "0"}`;
+      )}&stream=${streamParam}&audio=${audioEnabledRef.current ? "1" : "0"}`;
 
       ws = new WebSocket(wsUrl);
       ws.binaryType = "arraybuffer";
@@ -294,7 +336,7 @@ export function StreamTile({
       ws.onopen = () => {
         if (unmounted || !ws) return;
         try {
-          ws.send(JSON.stringify({ action: "audio", enable: audioEnabled }));
+          ws.send(JSON.stringify({ action: "audio", enable: audioEnabledRef.current }));
         } catch {}
       };
 
@@ -309,9 +351,13 @@ export function StreamTile({
 
         if (pktType === 0x01) {
           if (buf.length > 10) {
-            const codecStr = `avc1.${hex2(buf[1])}${hex2(buf[2])}${hex2(buf[3])}`;
-            const avcc = buf.slice(4);
-            configureAVCCDecoder(codecStr, avcc);
+            const rawDesc = buf.slice(4);
+            const isHevc =
+              buf[1] === 0xff && buf[2] === 0x48 && buf[3] === 0x35;
+            const codecStr = isHevc
+              ? buildHEVCCodecString(rawDesc)
+              : `avc1.${hex2(buf[1])}${hex2(buf[2])}${hex2(buf[3])}`;
+            configureAVCCDecoder(codecStr, rawDesc);
           }
           return;
         }
@@ -676,7 +722,14 @@ export function StreamTile({
           <span className="camera-tile__ip">{camera.ip}</span>
         </button>
 
-        <div className="camera-tile__controls" onClick={(e) => e.stopPropagation()}>
+        <div
+          className={`camera-tile__controls ${
+            audioEnabled || talkActive || isManualRecording
+              ? "camera-tile__controls--active"
+              : ""
+          }`}
+          onClick={(e) => e.stopPropagation()}
+        >
           <button
             type="button"
             className={`tile-ctrl-btn ${audioEnabled ? "tile-ctrl-btn--active" : ""}`}
@@ -690,43 +743,47 @@ export function StreamTile({
             </span>
           </button>
 
-          <button
-            type="button"
-            className={`tile-ctrl-btn ${
-              talkActive && talkMode === "toggle" ? "tile-ctrl-btn--talk" : ""
-            }`}
-            onClick={() => onToggleTalk(camera)}
-            title="点击开启或挂断持续双向语音对讲"
-            aria-label={`与 ${camera.name} 双向通话`}
-          >
-            {talkActive && talkMode === "toggle" ? (
-              <PhoneOff size={13} />
-            ) : (
-              <PhoneCall size={13} />
-            )}
-            <span className="tile-ctrl-btn__label">
-              {talkActive && talkMode === "toggle" ? "挂断" : "通话"}
-            </span>
-          </button>
+          {cameraSupportsTalk(camera) && (
+            <>
+              <button
+                type="button"
+                className={`tile-ctrl-btn ${
+                  talkActive && talkMode === "toggle" ? "tile-ctrl-btn--talk" : ""
+                }`}
+                onClick={() => onToggleTalk(camera)}
+                title="点击开启或挂断持续双向语音对讲"
+                aria-label={`与 ${camera.name} 双向通话`}
+              >
+                {talkActive && talkMode === "toggle" ? (
+                  <PhoneOff size={13} />
+                ) : (
+                  <PhoneCall size={13} />
+                )}
+                <span className="tile-ctrl-btn__label">
+                  {talkActive && talkMode === "toggle" ? "挂断" : "通话"}
+                </span>
+              </button>
 
-          <button
-            type="button"
-            className={`tile-ctrl-btn ${
-              talkActive && talkMode === "ptt" ? "tile-ctrl-btn--talk" : ""
-            }`}
-            onPointerDown={() => onStartPTT(camera)}
-            onPointerUp={() => onStopPTT(camera)}
-            onPointerLeave={() => {
-              if (talkActive && talkMode === "ptt") onStopPTT(camera);
-            }}
-            title="按住说话，松开结束对讲"
-            aria-label={`按住对 ${camera.name} 说话`}
-          >
-            <Mic size={13} />
-            <span className="tile-ctrl-btn__label">
-              {talkActive && talkMode === "ptt" ? "讲话中" : "按住讲"}
-            </span>
-          </button>
+              <button
+                type="button"
+                className={`tile-ctrl-btn ${
+                  talkActive && talkMode === "ptt" ? "tile-ctrl-btn--talk" : ""
+                }`}
+                onPointerDown={() => onStartPTT(camera)}
+                onPointerUp={() => onStopPTT(camera)}
+                onPointerLeave={() => {
+                  if (talkActive && talkMode === "ptt") onStopPTT(camera);
+                }}
+                title="按住说话，松开结束对讲"
+                aria-label={`按住对 ${camera.name} 说话`}
+              >
+                <Mic size={13} />
+                <span className="tile-ctrl-btn__label">
+                  {talkActive && talkMode === "ptt" ? "讲话中" : "按住讲"}
+                </span>
+              </button>
+            </>
+          )}
 
           <button
             type="button"

@@ -2,6 +2,7 @@ package recorder
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -166,6 +167,93 @@ func (m *Manager) StopManual(camID string) error {
 }
 
 func (m *Manager) SyncNow() {
+	m.reconcile()
+}
+
+// StopCamera gracefully flushes and stops an active recording worker for a single camera ID.
+func (m *Manager) StopCamera(camID string) {
+	if camID == "" {
+		return
+	}
+	m.mu.Lock()
+	w, ok := m.workers[camID]
+	if ok {
+		close(w.stopCh)
+		delete(m.workers, camID)
+	}
+	m.mu.Unlock()
+
+	if ok {
+		select {
+		case <-w.doneCh:
+		case <-time.After(1500 * time.Millisecond):
+		}
+	}
+}
+
+// MigrateCameraID flushes active recordings for oldCamID, migrates all historical date/<oldCamID>
+// recording folders on disk into date/<newCamID>, and resumes recording on newCamID.
+func (m *Manager) MigrateCameraID(oldCamID, newCamID string) {
+	oldCamID = strings.TrimSpace(oldCamID)
+	newCamID = strings.TrimSpace(newCamID)
+	if oldCamID == "" || newCamID == "" || oldCamID == newCamID {
+		return
+	}
+
+	m.mu.Lock()
+	if m.manualActive[oldCamID] {
+		delete(m.manualActive, oldCamID)
+		m.manualActive[newCamID] = true
+	}
+	w, hasWorker := m.workers[oldCamID]
+	if hasWorker {
+		close(w.stopCh)
+		delete(m.workers, oldCamID)
+	}
+	m.mu.Unlock()
+
+	if hasWorker {
+		select {
+		case <-w.doneCh:
+		case <-time.After(1500 * time.Millisecond):
+		}
+	}
+
+	cfg := m.store.GetConfig()
+	storageDir := effectiveStorageDir(cfg.Recording.StorageDir)
+	if entries, err := os.ReadDir(storageDir); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() || len(e.Name()) != 10 {
+				continue
+			}
+			dateDir := filepath.Join(storageDir, e.Name())
+			oldDir := filepath.Join(dateDir, oldCamID)
+			newDir := filepath.Join(dateDir, newCamID)
+			if st, err := os.Stat(oldDir); err != nil || !st.IsDir() {
+				continue
+			}
+			if _, err := os.Stat(newDir); os.IsNotExist(err) {
+				_ = os.Rename(oldDir, newDir)
+				continue
+			}
+			// Merge files from oldDir into newDir if newDir already exists
+			_ = os.MkdirAll(newDir, 0o755)
+			if files, err := os.ReadDir(oldDir); err == nil {
+				for _, f := range files {
+					if f.IsDir() {
+						continue
+					}
+					src := filepath.Join(oldDir, f.Name())
+					dst := filepath.Join(newDir, f.Name())
+					if _, err := os.Stat(dst); os.IsNotExist(err) {
+						_ = os.Rename(src, dst)
+					}
+				}
+			}
+			_ = os.Remove(oldDir)
+		}
+	}
+
 	m.reconcile()
 }
 
@@ -404,6 +492,20 @@ func (m *Manager) runWorker(w *activeWorker) {
 			case rtsp.MsgTypeAudioPCMA:
 				if segWriter != nil && len(pkt) > 1 {
 					_ = segWriter.WriteAudioPCMA(pkt[1:])
+				}
+			case rtsp.MsgTypeStatusJSON:
+				var st struct {
+					State   string `json:"state"`
+					Message string `json:"message"`
+				}
+				if err := json.Unmarshal(pkt[1:], &st); err == nil {
+					w.mu.Lock()
+					if st.State == "error" && st.Message != "" {
+						w.lastErr = st.Message
+					} else if st.State == "streaming" {
+						w.lastErr = ""
+					}
+					w.mu.Unlock()
 				}
 			}
 		}

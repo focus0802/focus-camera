@@ -139,6 +139,9 @@ func (e *Chromium) Init(script string) {
 }
 
 func (e *Chromium) Eval(script string) {
+	if e.webview == nil {
+		return
+	}
 	_script, err := windows.UTF16PtrFromString(script)
 	if err != nil {
 		log.Fatal(err)

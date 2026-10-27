@@ -8,6 +8,8 @@
 	<string>Focus Camera</string>
 	<key>CFBundleExecutable</key>
 	<string>FocusCamera</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.focuscamera.desktop</string>
 	<key>CFBundleInfoDictionaryVersion</key>
@@ -17,9 +19,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>2.0.0</string>
+	<string>2.2.0</string>
 	<key>CFBundleVersion</key>
-	<string>200</string>
+	<string>220</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>12.0</string>
 	<key>NSHighResolutionCapable</key>

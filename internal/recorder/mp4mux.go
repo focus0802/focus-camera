@@ -337,12 +337,20 @@ func mp4FullBox(boxType string, version byte, flags uint32, payload []byte) []by
 	return out
 }
 
+func isHVCCRecord(cfg []byte) bool {
+	return len(cfg) > 23 && cfg[15] == 0xFC && cfg[16] == 0xFD && (cfg[23]&0x3F) >= 32 && (cfg[23]&0x3F) <= 34
+}
+
 func buildFMP4InitSegment(avcc []byte, width, height uint16) []byte {
 	// 1. ftyp
 	var ftypBody bytes.Buffer
 	ftypBody.WriteString("isom")
 	_ = binary.Write(&ftypBody, binary.BigEndian, uint32(0x200))
-	ftypBody.WriteString("isomiso2avc1iso6mp41")
+	if isHVCCRecord(avcc) {
+		ftypBody.WriteString("isomiso2hvc1iso6mp41")
+	} else {
+		ftypBody.WriteString("isomiso2avc1iso6mp41")
+	}
 	ftyp := mp4Box("ftyp", ftypBody.Bytes())
 
 	// 2. moov
@@ -422,7 +430,13 @@ func buildVideoTRAK(avcc []byte, width, height uint16) []byte {
 	drefBody.Write(urlBox)
 	dinf := mp4Box("dinf", mp4FullBox("dref", 0, 0, drefBody.Bytes()))
 
-	// stsd -> avc1 -> avcC
+	// stsd -> avc1 (avcC) or hvc1 (hvcC)
+	sampleTag := "avc1"
+	configTag := "avcC"
+	if isHVCCRecord(avcc) {
+		sampleTag = "hvc1"
+		configTag = "hvcC"
+	}
 	var avc1Body bytes.Buffer
 	avc1Body.Write(make([]byte, 6))                            // reserved
 	_ = binary.Write(&avc1Body, binary.BigEndian, uint16(1))   // data_reference_index
@@ -436,8 +450,8 @@ func buildVideoTRAK(avcc []byte, width, height uint16) []byte {
 	avc1Body.Write(make([]byte, 32))                                  // compressorname
 	_ = binary.Write(&avc1Body, binary.BigEndian, uint16(0x0018))     // depth 24
 	_ = binary.Write(&avc1Body, binary.BigEndian, int16(-1))          // pre_defined
-	avc1Body.Write(mp4Box("avcC", avcc))
-	avc1Box := mp4Box("avc1", avc1Body.Bytes())
+	avc1Body.Write(mp4Box(configTag, avcc))
+	avc1Box := mp4Box(sampleTag, avc1Body.Bytes())
 
 	var stsdBody bytes.Buffer
 	_ = binary.Write(&stsdBody, binary.BigEndian, uint32(1))

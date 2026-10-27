@@ -62,9 +62,73 @@ static NSImage* createFocusCameraIcon(void) {
 	return image;
 }
 
-@interface FocusAppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, WKUIDelegate, WKNavigationDelegate>
-@property (nonatomic, strong) NSWindow *window;
-@property (nonatomic, strong) WKWebView *webView;
+@interface FocusWindow : NSWindow
+- (void)syncTrafficLights;
+@end
+
+@implementation FocusWindow
+
+- (void)layoutIfNeeded {
+	[super layoutIfNeeded];
+	[self syncTrafficLights];
+}
+
+- (void)syncTrafficLights {
+	if (([self styleMask] & NSWindowStyleMaskFullScreen) != 0) {
+		return;
+	}
+	NSButton *closeBtn = [self standardWindowButton:NSWindowCloseButton];
+	NSButton *miniBtn = [self standardWindowButton:NSWindowMiniaturizeButton];
+	NSButton *zoomBtn = [self standardWindowButton:NSWindowZoomButton];
+	if (!closeBtn || !miniBtn || !zoomBtn) {
+		return;
+	}
+	NSView *titlebarView = [closeBtn superview];
+	NSView *containerView = [titlebarView superview];
+	NSView *themeFrame = [containerView superview];
+	if (!titlebarView || !containerView || !themeFrame) {
+		return;
+	}
+	CGFloat barHeight = 58.0;
+	NSRect themeBounds = [themeFrame bounds];
+	NSRect targetContainerFrame = NSMakeRect(0, themeBounds.size.height - barHeight, 88.0, barHeight);
+	if (!NSEqualRects(containerView.frame, targetContainerFrame)) {
+		[containerView setFrame:targetContainerFrame];
+	}
+	NSRect targetTitlebarFrame = NSMakeRect(0, 0, 88.0, barHeight);
+	if (!NSEqualRects(titlebarView.frame, targetTitlebarFrame)) {
+		[titlebarView setFrame:targetTitlebarFrame];
+	}
+	CGFloat btnHeight = closeBtn.frame.size.height;
+	CGFloat y = round((barHeight - btnHeight) / 2.0);
+	[closeBtn setFrameOrigin:NSMakePoint(18.0, y)];
+	[miniBtn setFrameOrigin:NSMakePoint(38.0, y)];
+	[zoomBtn setFrameOrigin:NSMakePoint(58.0, y)];
+}
+
+@end
+
+@interface FocusWebView : WKWebView
+@property (nonatomic, strong) NSEvent *lastMouseDownEvent;
+@end
+
+@implementation FocusWebView
+
+- (BOOL)mouseDownCanMoveWindow {
+	return NO;
+}
+
+- (void)mouseDown:(NSEvent *)event {
+	self.lastMouseDownEvent = event;
+	[super mouseDown:event];
+}
+
+@end
+
+@interface FocusAppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, WKUIDelegate, WKNavigationDelegate, WKScriptMessageHandler>
+@property (nonatomic, strong) FocusWindow *window;
+@property (nonatomic, strong) FocusWebView *webView;
+@property (nonatomic, strong) NSStatusItem *statusItem;
 @property (nonatomic, copy) NSString *initialURL;
 @property (nonatomic, assign) BOOL forceClose;
 @end
@@ -133,13 +197,55 @@ static NSImage* createFocusCameraIcon(void) {
 	}
 }
 
+- (void)restoreFromTray:(id)sender {
+	if (self.window) {
+		[self.window makeKeyAndOrderFront:nil];
+		[self.window syncTrafficLights];
+		[NSApp activateIgnoringOtherApps:YES];
+	}
+}
+
+- (void)requestGracefulQuit:(id)sender {
+	[self restoreFromTray:sender];
+	if (self.webView) {
+		[self.webView evaluateJavaScript:@"window.dispatchEvent(new CustomEvent('focus-request-close'));" completionHandler:nil];
+	}
+}
+
+- (void)setupStatusBarTray:(NSImage *)appIcon {
+	self.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSSquareStatusItemLength];
+	if (self.statusItem.button && appIcon) {
+		NSImage *trayIcon = [appIcon copy];
+		[trayIcon setSize:NSMakeSize(18, 18)];
+		[self.statusItem.button setImage:trayIcon];
+		[self.statusItem.button setToolTip:@"FocusCamera · 高清监控与 NVR 中心（后台运行中）"];
+	}
+	NSMenu *trayMenu = [[NSMenu alloc] initWithTitle:@"FocusCamera"];
+	NSMenuItem *openItem = [[NSMenuItem alloc] initWithTitle:@"打开 FocusCamera 监控主界面" action:@selector(restoreFromTray:) keyEquivalent:@""];
+	[openItem setTarget:self];
+	[trayMenu addItem:openItem];
+	[trayMenu addItem:[NSMenuItem separatorItem]];
+	NSMenuItem *statusItemInfo = [[NSMenuItem alloc] initWithTitle:@"状态：后台 1080P 自动录像运行中" action:nil keyEquivalent:@""];
+	[statusItemInfo setEnabled:NO];
+	[trayMenu addItem:statusItemInfo];
+	[trayMenu addItem:[NSMenuItem separatorItem]];
+	NSMenuItem *quitItem = [[NSMenuItem alloc] initWithTitle:@"彻底退出并停止录像…" action:@selector(requestGracefulQuit:) keyEquivalent:@""];
+	[quitItem setTarget:self];
+	[trayMenu addItem:quitItem];
+	[self.statusItem setMenu:trayMenu];
+}
+
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
 	[self setupMenuBar];
 
-	NSImage *icon = createFocusCameraIcon();
+	NSImage *icon = [NSImage imageNamed:@"AppIcon"];
+	if (!icon) {
+		icon = createFocusCameraIcon();
+	}
 	if (icon) {
 		[NSApp setApplicationIconImage:icon];
 	}
+	[self setupStatusBarTray:icon];
 
 	NSScreen *screen = [NSScreen mainScreen];
 	NSRect visible = screen ? [screen visibleFrame] : NSMakeRect(0, 0, 1680, 980);
@@ -151,27 +257,37 @@ static NSImage* createFocusCameraIcon(void) {
 	NSWindowStyleMask style = NSWindowStyleMaskTitled |
 	                          NSWindowStyleMaskClosable |
 	                          NSWindowStyleMaskMiniaturizable |
-	                          NSWindowStyleMaskResizable;
+	                          NSWindowStyleMaskResizable |
+	                          NSWindowStyleMaskFullSizeContentView;
 
-	self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(x, y, width, height)
-	                                          styleMask:style
-	                                            backing:NSBackingStoreBuffered
-	                                              defer:NO];
-	[self.window setTitle:@"Focus Camera · 29路教室高清监控与双向对讲系统"];
+	self.window = [[FocusWindow alloc] initWithContentRect:NSMakeRect(x, y, width, height)
+	                                             styleMask:style
+	                                               backing:NSBackingStoreBuffered
+	                                                 defer:NO];
+	[self.window setTitle:@"Focus Camera · 高清监控与 NVR 中心"];
+	[self.window setTitleVisibility:NSWindowTitleHidden];
+	[self.window setTitlebarAppearsTransparent:YES];
+	[self.window setMovableByWindowBackground:NO];
 	[self.window setMinSize:NSMakeSize(1100, 700)];
 	[self.window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenPrimary];
 	[self.window setAppearance:[NSAppearance appearanceNamed:NSAppearanceNameDarkAqua]];
-	[self.window setBackgroundColor:[NSColor colorWithSRGBRed:0.055 green:0.067 blue:0.090 alpha:1.0]];
+	[self.window setBackgroundColor:[NSColor colorWithSRGBRed:0.086 green:0.086 blue:0.086 alpha:1.0]];
 	[self.window setDelegate:self];
 
 	WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
 	config.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
+	[config.userContentController addScriptMessageHandler:self name:@"focusWindow"];
+	NSString *initScript = @"document.documentElement.dataset.platform = 'macos'; document.documentElement.dataset.windowMode = 'windowed';";
+	WKUserScript *userScript = [[WKUserScript alloc] initWithSource:initScript
+	                                                  injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+	                                               forMainFrameOnly:YES];
+	[config.userContentController addUserScript:userScript];
 	@try {
 		[config.preferences setValue:@YES forKey:@"developerExtrasEnabled"];
 	} @catch (NSException *exception) {}
 
-	self.webView = [[WKWebView alloc] initWithFrame:[[self.window contentView] bounds]
-	                                  configuration:config];
+	self.webView = [[FocusWebView alloc] initWithFrame:[[self.window contentView] bounds]
+	                                     configuration:config];
 	[self.webView setAutoresizingMask:(NSViewWidthSizable | NSViewHeightSizable)];
 	[self.webView setUIDelegate:self];
 	[self.webView setNavigationDelegate:self];
@@ -188,7 +304,71 @@ static NSImage* createFocusCameraIcon(void) {
 	}
 
 	[self.window makeKeyAndOrderFront:nil];
+	[self.window syncTrafficLights];
 	[NSApp activateIgnoringOtherApps:YES];
+}
+
+- (void)userContentController:(WKUserContentController *)userContentController
+      didReceiveScriptMessage:(WKScriptMessage *)message {
+	if (![message.name isEqualToString:@"focusWindow"] || ![message.body isKindOfClass:[NSString class]]) {
+		return;
+	}
+	NSString *action = (NSString *)message.body;
+	if ([action isEqualToString:@"drag"]) {
+		NSEvent *ev = self.webView.lastMouseDownEvent ?: [NSApp currentEvent];
+		if (ev && self.window) {
+			if (ev.clickCount == 2) {
+				[self.window performZoom:nil];
+			} else {
+				[self.window performWindowDragWithEvent:ev];
+			}
+		}
+	} else if ([action isEqualToString:@"zoom"]) {
+		if (self.window) {
+			[self.window performZoom:nil];
+		}
+	} else if ([action isEqualToString:@"minimize"]) {
+		if (self.window) {
+			[self.window miniaturize:nil];
+		}
+	} else if ([action isEqualToString:@"tray"]) {
+		if (self.window) {
+			[self.window orderOut:nil];
+		}
+	} else if ([action isEqualToString:@"theme:light"]) {
+		if (self.window) {
+			[self.window setAppearance:[NSAppearance appearanceNamed:NSAppearanceNameAqua]];
+			[self.window setBackgroundColor:[NSColor colorWithSRGBRed:1.0 green:1.0 blue:1.0 alpha:1.0]];
+		}
+	} else if ([action isEqualToString:@"theme:dark"]) {
+		if (self.window) {
+			[self.window setAppearance:[NSAppearance appearanceNamed:NSAppearanceNameDarkAqua]];
+			[self.window setBackgroundColor:[NSColor colorWithSRGBRed:0.086 green:0.086 blue:0.086 alpha:1.0]];
+		}
+	}
+}
+
+- (void)windowDidResize:(NSNotification *)notification {
+	[self.window syncTrafficLights];
+}
+
+- (void)windowDidBecomeKey:(NSNotification *)notification {
+	[self.window syncTrafficLights];
+}
+
+- (void)windowDidResignKey:(NSNotification *)notification {
+	[self.window syncTrafficLights];
+}
+
+- (void)windowDidEnterFullScreen:(NSNotification *)notification {
+	[self.webView evaluateJavaScript:@"document.documentElement.dataset.windowMode = 'fullscreen';" completionHandler:nil];
+}
+
+- (void)windowDidExitFullScreen:(NSNotification *)notification {
+	[self.webView evaluateJavaScript:@"document.documentElement.dataset.windowMode = 'windowed';" completionHandler:nil];
+	dispatch_async(dispatch_get_main_queue(), ^{
+		[self.window syncTrafficLights];
+	});
 }
 
 // Auto-grant Microphone permission for :8800 Two-Way Voice Intercom
@@ -295,23 +475,11 @@ decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
 	if (self.forceClose) {
 		return YES;
 	}
-	NSAlert *alert = [[NSAlert alloc] init];
-	[alert setMessageText:@"需要保持后台继续录制监控吗？"];
-	[alert setInformativeText:@"点击「最小化到程序坞」将在后台继续进行 29 路 1080P 自动录像；点击「彻底退出并停录」将保存当前录像分片并完全关闭软件。"];
-	[alert addButtonWithTitle:@"最小化到程序坞（继续录像）"];
-	[alert addButtonWithTitle:@"彻底退出并停录"];
-	[alert addButtonWithTitle:@"取消"];
-	[alert setAlertStyle:NSAlertStyleInformational];
-
-	[alert beginSheetModalForWindow:sender completionHandler:^(NSModalResponse returnCode) {
-		if (returnCode == NSAlertFirstButtonReturn) {
-			[sender miniaturize:nil];
-		} else if (returnCode == NSAlertSecondButtonReturn) {
-			self.forceClose = YES;
-			[NSApp terminate:nil];
-		}
-	}];
-	return NO;
+	if (self.webView) {
+		[self.webView evaluateJavaScript:@"window.dispatchEvent(new CustomEvent('focus-request-close'));" completionHandler:nil];
+		return NO;
+	}
+	return YES;
 }
 
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
@@ -329,8 +497,16 @@ decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
 	return NSTerminateCancel;
 }
 
-- (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {
+- (BOOL)applicationShouldHandleReopen:(NSApplication *)sender hasVisibleWindows:(BOOL)flag {
+	if (!flag && self.window) {
+		[self.window makeKeyAndOrderFront:nil];
+		[self.window syncTrafficLights];
+	}
 	return YES;
+}
+
+- (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {
+	return self.forceClose;
 }
 
 - (void)windowWillClose:(NSNotification *)notification {

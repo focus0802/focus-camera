@@ -26,6 +26,7 @@ import (
 
 	"focus-camera/internal/config"
 	"focus-camera/internal/discovery"
+	"focus-camera/internal/ptz"
 	"focus-camera/internal/recorder"
 	"focus-camera/internal/rtsp"
 	"focus-camera/internal/talk"
@@ -261,6 +262,10 @@ func (w *rotatingLogWriter) openOrRotate() {
 		}
 	}
 	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		_ = os.Remove(w.path)
+		f, err = os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	}
 	if err == nil {
 		w.f = f
 	}
@@ -307,6 +312,7 @@ func main() {
 	hub := rtsp.NewStreamHub(store)
 	recMgr := recorder.NewManager(store, hub)
 	updMgr := updater.NewManager(store)
+	ptzCtrl := ptz.NewController()
 
 	// Non-blocking startup update check against GitHub Releases (or configured update source)
 	go func() {
@@ -349,11 +355,61 @@ func main() {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			if err := store.UpsertCamera(cam); err != nil {
+			cam.IP = strings.TrimSpace(cam.IP)
+			cam.Name = strings.TrimSpace(cam.Name)
+			if cam.IP != "" {
+				cfg := store.GetConfig()
+				user := strings.TrimSpace(cam.Username)
+				if user == "" {
+					user = cfg.DefaultUsername
+				}
+				pass := cam.Password
+				if pass == "" && !cam.NoPassword {
+					pass = cfg.DefaultPassword
+				}
+				if cam.Name == "" || strings.HasPrefix(cam.Name, "摄像头 (") {
+					if res, ok := discovery.ProbeTPLinkCameraDetail(cam.IP, user, []string{pass}, true, 1800*time.Millisecond); ok && res.AuthOK {
+						if cam.Name == "" || strings.HasPrefix(cam.Name, "摄像头 (") {
+							cam.Name = res.Camera.Name
+						}
+						if cam.Group == "" {
+							cam.Group = res.Camera.Group
+						}
+						if cam.Model == "" {
+							cam.Model = res.Camera.Model
+						}
+						if cam.Vendor == "" {
+							cam.Vendor = res.Camera.Vendor
+						}
+						if cam.MainStreamPath == "" {
+							cam.MainStreamPath = res.Camera.MainStreamPath
+						}
+						if cam.SubStreamPath == "" {
+							cam.SubStreamPath = res.Camera.SubStreamPath
+						}
+						if res.Camera.SupportsTalk {
+							cam.SupportsTalk = true
+						}
+						cam.Password = res.Camera.Password
+						cam.NoPassword = res.Camera.NoPassword
+					}
+				} else if cam.IsTPLink() {
+					go func(ip, u, p string) {
+						_ = discovery.EnsureH264Video(ip, u, p)
+					}(cam.IP, user, pass)
+				}
+			}
+			oldID, newID, err := store.UpsertCameraTrackID(cam)
+			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			recMgr.SyncNow()
+			if oldID != "" && oldID != newID {
+				hub.CloseCamera(oldID)
+				recMgr.MigrateCameraID(oldID, newID)
+			} else {
+				recMgr.SyncNow()
+			}
 			updCfg := store.GetConfig()
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"ok":            true,
@@ -402,13 +458,82 @@ func main() {
 		if sub == "" {
 			sub = req.Subnet
 		}
+
+		// When cameras were scanned without a password (Name is empty or "摄像头 (<IP>)")
+		// and the user supplies their password(s) at add time, probe them in parallel to
+		// automatically fetch their internal OSD room names and ensure H.264.
+		var probeWg sync.WaitGroup
+		for i := range req.Cameras {
+			idx := i
+			c := &req.Cameras[idx]
+			c.IP = strings.TrimSpace(c.IP)
+			c.Name = strings.TrimSpace(c.Name)
+			if c.IP == "" {
+				continue
+			}
+			user := strings.TrimSpace(c.Username)
+			if user == "" {
+				user = strings.TrimSpace(req.Username)
+			}
+			pass := c.Password
+			if pass == "" && !c.NoPassword {
+				pass = req.Password
+			}
+			if c.Name == "" || strings.HasPrefix(c.Name, "摄像头 (") {
+				probeWg.Add(1)
+				go func(target *config.Camera, u, p string) {
+					defer probeWg.Done()
+					if res, ok := discovery.ProbeTPLinkCameraDetail(target.IP, u, []string{p}, true, 1800*time.Millisecond); ok && res.AuthOK {
+						if target.Name == "" || strings.HasPrefix(target.Name, "摄像头 (") {
+							target.Name = res.Camera.Name
+						}
+						if target.Group == "" {
+							target.Group = res.Camera.Group
+						}
+						if target.Model == "" {
+							target.Model = res.Camera.Model
+						}
+						if target.Vendor == "" {
+							target.Vendor = res.Camera.Vendor
+						}
+						if target.MainStreamPath == "" {
+							target.MainStreamPath = res.Camera.MainStreamPath
+						}
+						if target.SubStreamPath == "" {
+							target.SubStreamPath = res.Camera.SubStreamPath
+						}
+						if res.Camera.SupportsTalk {
+							target.SupportsTalk = true
+						}
+						target.Password = res.Camera.Password
+						target.NoPassword = res.Camera.NoPassword
+					}
+				}(c, user, pass)
+			}
+		}
+		probeWg.Wait()
+
+		prevCfg := store.GetConfig()
+		oldIDByName := make(map[string]string, len(prevCfg.Cameras))
+		for _, c := range prevCfg.Cameras {
+			if c.Name != "" && !strings.HasPrefix(c.Name, "摄像头 (") {
+				oldIDByName[c.Name] = c.ID
+			}
+		}
+
 		added, updated, err := store.BatchUpsertCameras(req.Cameras, sub, req.Username, req.Password)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		recMgr.SyncNow()
 		updCfg := store.GetConfig()
+		for _, c := range updCfg.Cameras {
+			if oldID, ok := oldIDByName[c.Name]; ok && oldID != "" && oldID != c.ID {
+				hub.CloseCamera(oldID)
+				recMgr.MigrateCameraID(oldID, c.ID)
+			}
+		}
+		recMgr.SyncNow()
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ok":            true,
 			"added":         added,
@@ -552,20 +677,31 @@ func main() {
 		if req.Username == "" {
 			req.Username = cfg.DefaultUsername
 		}
-		if req.Password == "" {
-			req.Password = cfg.DefaultPassword
-		}
-
-		found := discovery.ScanSubnet(req.SubnetPrefix, req.Username, req.Password)
 
 		byIP := make(map[string]config.Camera, len(cfg.Cameras))
 		byName := make(map[string]config.Camera, len(cfg.Cameras))
+		perIPPasswords := make(map[string]string, len(cfg.Cameras))
+		defaultPasswords := make([]string, 0, 4+len(cfg.Cameras))
+		if req.Password != "" {
+			defaultPasswords = append(defaultPasswords, req.Password)
+		}
+		if cfg.DefaultPassword != "" {
+			defaultPasswords = append(defaultPasswords, cfg.DefaultPassword)
+		}
 		for _, c := range cfg.Cameras {
 			byIP[c.IP] = c
 			if c.Name != "" && !strings.HasPrefix(c.Name, "摄像头 (") {
 				byName[c.Name] = c
 			}
+			if c.Password != "" || c.NoPassword {
+				perIPPasswords[c.IP] = c.Password
+			}
+			if c.Password != "" {
+				defaultPasswords = append(defaultPasswords, c.Password)
+			}
 		}
+
+		found := discovery.ScanSubnetDetailed(req.SubnetPrefix, req.Username, defaultPasswords, perIPPasswords)
 
 		type DiscoveredItem struct {
 			config.Camera
@@ -583,7 +719,8 @@ func main() {
 			AuthOK         bool   `json:"auth_ok"`
 		}
 		items := make([]DiscoveredItem, 0, len(found))
-		for _, d := range found {
+		for _, res := range found {
+			d := res.Camera
 			st := "new"
 			oldIP := ""
 			existingID := ""
@@ -596,7 +733,9 @@ func main() {
 			} else if ex, ok := byIP[d.IP]; ok {
 				st = "existing"
 				existingID = ex.ID
-				d.Name = ex.Name
+				if !res.AuthOK || strings.HasPrefix(d.Name, "摄像头 (") {
+					d.Name = ex.Name
+				}
 				d.Group = ex.Group
 				d.AutoRecord = ex.AutoRecord
 			}
@@ -607,13 +746,13 @@ func main() {
 				OldIP:          oldIP,
 				ExistingID:     existingID,
 				Reachable:      true,
-				RTSPOpen:       true,
-				TalkOpen:       d.SupportsTalk,
-				HTTPOpen:       true,
+				RTSPOpen:       res.RTSPOpen,
+				TalkOpen:       res.TalkOpen,
+				HTTPOpen:       res.HTTPOpen,
 				DeviceModel:    d.Model,
 				SuggestedName:  d.Name,
 				SuggestedGroup: d.Group,
-				AuthOK:         !strings.HasPrefix(d.Name, "摄像头 ("),
+				AuthOK:         res.AuthOK,
 			})
 		}
 
@@ -624,6 +763,58 @@ func main() {
 			"found":         len(items),
 			"items":         items,
 			"discovered":    items,
+		})
+	})
+
+	// 2a. API: Probe a single camera IP with credentials to verify password and fetch internal OSD room name
+	mux.HandleFunc("/api/discover/probe", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		var req struct {
+			IP       string `json:"ip"`
+			Username string `json:"username"`
+			Password string `json:"password"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		ip := strings.TrimSpace(req.IP)
+		if ip == "" {
+			http.Error(w, "ip is required", http.StatusBadRequest)
+			return
+		}
+		cfg := store.GetConfig()
+		user := strings.TrimSpace(req.Username)
+		if user == "" {
+			user = cfg.DefaultUsername
+		}
+		res, ok := discovery.ProbeTPLinkCameraDetail(ip, user, []string{req.Password}, true, 2500*time.Millisecond)
+		if !ok {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok":        false,
+				"reachable": false,
+				"auth_ok":   false,
+				"error":     "无法连接该 IP 的 554/8800 端口，请检查 IP 是否在线",
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":              true,
+			"reachable":       true,
+			"auth_ok":         res.AuthOK,
+			"rtsp_open":       res.RTSPOpen,
+			"talk_open":       res.TalkOpen,
+			"http_open":       res.HTTPOpen,
+			"camera":          res.Camera,
+			"device_model":    res.Camera.Model,
+			"suggested_name":  res.Camera.Name,
+			"suggested_group": res.Camera.Group,
+			"password":        res.Camera.Password,
+			"no_password":     res.Camera.NoPassword,
 		})
 	})
 
@@ -740,6 +931,355 @@ func main() {
 			"camera": cam.Name,
 			"ip":     cam.IP,
 		})
+	})
+
+	// 3c. API: Read or modify a camera's hardware network configuration (Static IP / Netmask / Gateway / DHCP)
+	mux.HandleFunc("/api/cameras/network", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		switch r.Method {
+		case http.MethodGet:
+			camID := strings.TrimSpace(r.URL.Query().Get("id"))
+			ip := strings.TrimSpace(r.URL.Query().Get("ip"))
+			user := strings.TrimSpace(r.URL.Query().Get("username"))
+			pass := r.URL.Query().Get("password")
+
+			cfg := store.GetConfig()
+			if cam, ok := store.GetCamera(camID); ok {
+				if ip == "" {
+					ip = cam.IP
+				}
+				if user == "" {
+					user = cam.Username
+				}
+				if pass == "" && !cam.NoPassword {
+					pass = cam.Password
+				}
+			} else if ip != "" {
+				if camByIP, ok := store.GetCamera(ip); ok {
+					if user == "" {
+						user = camByIP.Username
+					}
+					if pass == "" && !camByIP.NoPassword {
+						pass = camByIP.Password
+					}
+				}
+			}
+			if user == "" {
+				user = cfg.DefaultUsername
+			}
+			if pass == "" {
+				pass = cfg.DefaultPassword
+			}
+			if ip == "" {
+				http.Error(w, `{"ok":false,"error":"缺少摄像头 IP 参数"}`, http.StatusBadRequest)
+				return
+			}
+
+			netCfg, err := discovery.GetCameraNetworkConfig(ip, user, pass)
+			if err != nil {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"ok":      false,
+					"network": netCfg,
+					"error":   err.Error(),
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok":      true,
+				"network": netCfg,
+			})
+
+		case http.MethodPost, http.MethodPut:
+			var req struct {
+				ID          string `json:"id"`
+				OldIP       string `json:"old_ip"`
+				NewIP       string `json:"new_ip"`
+				Proto       string `json:"proto"` // "static" | "dhcp"
+				Netmask     string `json:"netmask"`
+				Gateway     string `json:"gateway"`
+				Username    string `json:"username"`
+				Password    string `json:"password"`
+				NoPassword  bool   `json:"no_password"`
+				UpdateStore *bool  `json:"update_store"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+
+			cfg := store.GetConfig()
+			oldIP := strings.TrimSpace(req.OldIP)
+			newIP := strings.TrimSpace(req.NewIP)
+			user := strings.TrimSpace(req.Username)
+			pass := req.Password
+
+			var existingCam config.Camera
+			var hasExisting bool
+			if req.ID != "" {
+				existingCam, hasExisting = store.GetCamera(req.ID)
+			}
+			if !hasExisting && oldIP != "" {
+				existingCam, hasExisting = store.GetCamera(oldIP)
+			}
+			if hasExisting {
+				if oldIP == "" {
+					oldIP = existingCam.IP
+				}
+				if user == "" {
+					user = existingCam.Username
+				}
+				if pass == "" && !req.NoPassword && !existingCam.NoPassword {
+					pass = existingCam.Password
+				}
+			}
+			if user == "" {
+				user = cfg.DefaultUsername
+			}
+			if pass == "" && !req.NoPassword && (!hasExisting || !existingCam.NoPassword) {
+				pass = cfg.DefaultPassword
+			}
+
+			if oldIP == "" {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"ok":    false,
+					"error": "原摄像头 IP 不能为空",
+				})
+				return
+			}
+			proto := strings.ToLower(strings.TrimSpace(req.Proto))
+			if proto != "dhcp" {
+				proto = "static"
+			}
+			if proto == "static" {
+				if newIP == "" {
+					newIP = oldIP
+				}
+				parsed := net.ParseIP(newIP)
+				if parsed == nil || parsed.To4() == nil {
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"ok":    false,
+						"error": fmt.Sprintf("新 IP 地址 (%s) 格式无效，请输入合法的 IPv4 地址", newIP),
+					})
+					return
+				}
+			}
+
+			// Read current hardware network info (for MAC & default netmask/gateway)
+			curNet, _ := discovery.GetCameraNetworkConfig(oldIP, user, pass)
+			netmask := strings.TrimSpace(req.Netmask)
+			if netmask == "" {
+				netmask = curNet.Netmask
+			}
+			gateway := strings.TrimSpace(req.Gateway)
+			if gateway == "" {
+				// If moving across subnets, infer gateway from newIP; otherwise preserve camera's current gateway
+				oldGw, _ := discovery.InferGatewayAndNetmask(oldIP)
+				newGw, _ := discovery.InferGatewayAndNetmask(newIP)
+				if newGw != oldGw || curNet.Gateway == "" {
+					gateway = newGw
+				} else {
+					gateway = curNet.Gateway
+				}
+			}
+
+			// Pre-check IP conflict if target IP is changing
+			if proto == "static" && newIP != oldIP {
+				for _, c := range cfg.Cameras {
+					if c.IP == newIP && (!hasExisting || c.ID != existingCam.ID) {
+						_ = json.NewEncoder(w).Encode(map[string]any{
+							"ok":       false,
+							"conflict": true,
+							"error":    fmt.Sprintf("目标 IP %s 已被列表中另一台摄像头「%s」使用，请更换其他 IP", newIP, c.Name),
+						})
+						return
+					}
+				}
+				if conflict, reason := discovery.CheckIPConflict(newIP, curNet.MAC, user, []string{pass, cfg.DefaultPassword}); conflict {
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"ok":       false,
+						"conflict": true,
+						"error":    reason,
+					})
+					return
+				}
+			}
+
+			// Stop active stream & recording worker on old IP before reconfiguring hardware network interface
+			if hasExisting && proto == "static" && newIP != oldIP {
+				hub.CloseCamera(existingCam.ID)
+				recMgr.StopCamera(existingCam.ID)
+			}
+
+			appliedNet, err := discovery.SetCameraNetworkConfig(oldIP, user, pass, discovery.NetworkConfig{
+				Proto:   proto,
+				IPAddr:  newIP,
+				Netmask: netmask,
+				Gateway: gateway,
+				MAC:     curNet.MAC,
+				DNS:     curNet.DNS,
+			})
+			if err != nil {
+				if hasExisting {
+					recMgr.SyncNow()
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"ok":    false,
+					"error": err.Error(),
+				})
+				return
+			}
+
+			shouldUpdateStore := req.UpdateStore == nil || *req.UpdateStore
+			newID := config.MakeID(appliedNet.IPAddr)
+			if shouldUpdateStore && hasExisting && appliedNet.IPAddr != "" {
+				oldID := existingCam.ID
+				existingCam.IP = appliedNet.IPAddr
+				existingCam.Username = user
+				existingCam.Password = pass
+				existingCam.NoPassword = req.NoPassword || pass == ""
+				_, newID, _ = store.UpsertCameraTrackID(existingCam)
+				if oldID != "" && oldID != newID {
+					recMgr.MigrateCameraID(oldID, newID)
+				} else {
+					recMgr.SyncNow()
+				}
+			}
+
+			updCfg := store.GetConfig()
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok":            true,
+				"old_ip":        oldIP,
+				"new_ip":        appliedNet.IPAddr,
+				"id":            newID,
+				"network":       appliedNet,
+				"cameras":       updCfg.Cameras,
+				"config":        updCfg,
+				"record_status": recMgr.GetStatus(),
+			})
+
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	// 3d. API: Camera PTZ (Pan-Tilt-Zoom, Presets & Calibration)
+	mux.HandleFunc("/api/cameras/ptz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		switch r.Method {
+		case http.MethodGet:
+			camID := strings.TrimSpace(r.URL.Query().Get("id"))
+			cam, ok := store.GetCamera(camID)
+			if !ok {
+				http.Error(w, `{"ok":false,"error":"未找到摄像头"}`, http.StatusNotFound)
+				return
+			}
+			capRes := ptzCtrl.ProbeCapabilities(cam)
+			if capRes.SupportsPTZ != cam.SupportsPTZ || (capRes.Model != "" && capRes.Model != cam.Model) || (capRes.FlipType != "" && capRes.FlipType != cam.FlipType) {
+				_ = store.SetCameraPTZInfo(cam.ID, capRes.SupportsPTZ, capRes.Model, capRes.FlipType)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok":           true,
+				"supports_ptz": capRes.SupportsPTZ,
+				"protocol":     capRes.Protocol,
+				"model":        capRes.Model,
+				"flip_type":    capRes.FlipType,
+				"invert_x":     capRes.InvertX,
+				"invert_y":     capRes.InvertY,
+				"presets":      capRes.Presets,
+				"message":      capRes.Message,
+			})
+
+		case http.MethodPost:
+			var req ptz.CommandRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			camID := strings.TrimSpace(req.ID)
+			if camID == "" {
+				camID = strings.TrimSpace(r.URL.Query().Get("id"))
+			}
+			cam, ok := store.GetCamera(camID)
+			if !ok {
+				http.Error(w, `{"ok":false,"error":"未找到摄像头"}`, http.StatusNotFound)
+				return
+			}
+
+			action := strings.ToLower(strings.TrimSpace(req.Action))
+			if action == "set_invert" {
+				_ = store.SetCameraPTZInvert(cam.ID, req.InvertX, req.InvertY, "")
+				updatedCam, _ := store.GetCamera(cam.ID)
+				invX, invY := ptz.ResolveEffectiveInvert(updatedCam, updatedCam.FlipType)
+				_ = json.NewEncoder(w).Encode(ptz.ExecuteResult{
+					OK:               true,
+					HardwareExecuted: true,
+					SupportsPTZ:      updatedCam.SupportsPTZ,
+					Protocol:         "tplink",
+					FlipType:         updatedCam.FlipType,
+					InvertX:          invX,
+					InvertY:          invY,
+					Presets:          updatedCam.PTZPresets,
+					Message:          "已保存当前摄像头的云台方向校准设置",
+				})
+				return
+			}
+
+			execRes := ptzCtrl.Execute(cam, req)
+			if execRes.HardwareExecuted && !cam.SupportsPTZ {
+				_ = store.SetCameraSupportsPTZ(cam.ID, true)
+			}
+
+			switch action {
+			case "set_flip":
+				if execRes.OK && execRes.FlipType != "" {
+					invX := execRes.FlipType == "center" || execRes.FlipType == "left_right"
+					invY := execRes.FlipType == "center" || execRes.FlipType == "up_down"
+					_ = store.SetCameraPTZInvert(cam.ID, &invX, &invY, execRes.FlipType)
+					execRes.InvertX = invX
+					execRes.InvertY = invY
+				}
+				if updatedCam, ok := store.GetCamera(cam.ID); ok {
+					execRes.Presets = updatedCam.PTZPresets
+				}
+
+			case "preset_set":
+				pName := strings.TrimSpace(req.PresetName)
+				if pName == "" {
+					pName = fmt.Sprintf("预置位 %d", len(cam.PTZPresets)+1)
+				}
+				pID := strings.TrimSpace(req.PresetID)
+				if pID == "" && execRes.CreatedHWToken != "" {
+					pID = execRes.CreatedHWToken
+				}
+				preset := config.PTZPreset{
+					ID:       pID,
+					Name:     pName,
+					HWToken:  execRes.CreatedHWToken,
+					Hardware: execRes.HardwareExecuted,
+				}
+				if req.DigitalView != nil {
+					preset.Zoom = req.DigitalView.Zoom
+					preset.PanX = req.DigitalView.PanX
+					preset.PanY = req.DigitalView.PanY
+				}
+				presets, _ := store.UpsertCameraPTZPreset(cam.ID, preset)
+				execRes.Presets = presets
+
+			case "preset_delete":
+				presets, _ := store.DeleteCameraPTZPreset(cam.ID, strings.TrimSpace(req.PresetID))
+				execRes.Presets = presets
+
+			default:
+				if updatedCam, ok := store.GetCamera(cam.ID); ok {
+					execRes.Presets = updatedCam.PTZPresets
+				}
+			}
+
+			_ = json.NewEncoder(w).Encode(execRes)
+
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
 	})
 
 	// 4. API: Recording & Playback Queries and Controls
@@ -1050,12 +1590,30 @@ func main() {
 		}()
 	})
 
-	// 8. Static UI files from embedded web/
+	// 8. Static UI files: prefer live workspace web/ directory if present on disk,
+	// falling back to embedded web/ for standalone single-binary distribution.
 	webSub, err := fs.Sub(webEmbed, "web")
 	if err != nil {
 		log.Fatal(err)
 	}
-	mux.Handle("/", http.FileServer(http.FS(webSub)))
+	embeddedFileServer := http.FileServer(http.FS(webSub))
+	cfgDir := filepath.Dir(cfgFile)
+	diskWebCandidates := []string{
+		filepath.Join(cfgDir, "web"),
+		filepath.Join(filepath.Dir(cfgDir), "web"),
+	}
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Expires", "0")
+		for _, dir := range diskWebCandidates {
+			if st, err := os.Stat(filepath.Join(dir, "index.html")); err == nil && !st.IsDir() {
+				http.FileServer(http.Dir(dir)).ServeHTTP(w, r)
+				return
+			}
+		}
+		embeddedFileServer.ServeHTTP(w, r)
+	})
 
 	killPreviousInstances(*portFlag)
 
@@ -1080,7 +1638,7 @@ func main() {
 		select {}
 	}
 
-	runNativeDesktopWindow(actualURL)
+	runNativeDesktopWindow(fmt.Sprintf("%s/?_v=%d", actualURL, time.Now().UnixMilli()))
 	log.Printf("桌面窗口已关闭，正在安全刷盘并关闭所有 1080P 录像分片...")
 	recMgr.StopAll()
 	log.Printf("所有录像分片已安全落盘，程序退出。")

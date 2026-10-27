@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUpDown,
   Camera as CameraIcon,
+  Compass,
   Download,
   Film,
   Mic,
@@ -17,15 +18,18 @@ import {
   VideoOff,
   VolumeX,
 } from "lucide-react";
-import type {
-  Camera,
-  RecordingConfig,
-  RecordingState,
-  RecordingsPayload,
-  UpdateStatus,
+import {
+  cameraSupportsTalk,
+  type Camera,
+  type PTZPreset,
+  type RecordingConfig,
+  type RecordingState,
+  type RecordingsPayload,
+  type UpdateStatus,
 } from "./types";
 import { TalkbackSession } from "./lib/audio";
 import { StreamTile } from "./components/StreamTile";
+import { PTZControlPanel } from "./components/PTZControlPanel";
 import { PlaybackView } from "./components/PlaybackView";
 import { DeviceManagerView } from "./components/DeviceManagerView";
 import SegmentedControl from "./components/arc/segmented-control/segmented-control";
@@ -67,10 +71,94 @@ export function App() {
     return saved === "light" ? "light" : "dark";
   });
 
+  const isMacDesktop = useMemo(() => {
+    if (typeof window === "undefined") return false;
+    return (
+      window.__FOCUS_PLATFORM__ === "macos" ||
+      Boolean(window.webkit?.messageHandlers?.focusWindow)
+    );
+  }, []);
+
+  const isWindowsDesktop = useMemo(() => {
+    if (typeof window === "undefined") return false;
+    const params = new URLSearchParams(window.location.search);
+    return (
+      window.__FOCUS_PLATFORM__ === "windows" ||
+      params.get("desktop") === "windows" ||
+      Boolean(window.chrome?.webview?.postMessage) ||
+      (/Windows/i.test(navigator.userAgent) && !isMacDesktop)
+    );
+  }, [isMacDesktop]);
+
+  const sendWindowsControl = useCallback(
+    (action: "drag" | "minimize" | "tray" | "remove-tray" | "maximize" | "close") => {
+      if (window.chrome?.webview?.postMessage) {
+        window.chrome.webview.postMessage(
+          JSON.stringify({
+            id: 0,
+            method: "focusWindowControl",
+            params: [action],
+          })
+        );
+        return;
+      }
+      if (window.focusWindowControl) {
+        void window.focusWindowControl(action);
+        return;
+      }
+      if (action === "close") {
+        setShutdownModalOpen(true);
+      }
+    },
+    []
+  );
+
+  useEffect(() => {
+    const onRequestClose = () => {
+      setShutdownModalOpen(true);
+    };
+    window.addEventListener("focus-request-close", onRequestClose);
+    return () => window.removeEventListener("focus-request-close", onRequestClose);
+  }, []);
+
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem("focus_theme", theme);
+    window.webkit?.messageHandlers?.focusWindow?.postMessage(`theme:${theme}`);
+    if (window.chrome?.webview?.postMessage) {
+      window.chrome.webview.postMessage(
+        JSON.stringify({
+          id: 0,
+          method: "focusSyncWindowTheme",
+          params: [theme],
+        })
+      );
+    } else {
+      void window.focusSyncWindowTheme?.(theme);
+    }
   }, [theme]);
+
+  const handleHeaderMouseDown = useCallback(
+    (e: React.MouseEvent<HTMLElement>) => {
+      if (e.button !== 0) return;
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      if (
+        target.closest(
+          'button, a, input, select, textarea, [role="tab"], [role="button"], [role="switch"], [data-no-drag]'
+        )
+      ) {
+        return;
+      }
+      window.webkit?.messageHandlers?.focusWindow?.postMessage("drag");
+      if (e.detail === 2) {
+        sendWindowsControl("maximize");
+      } else {
+        sendWindowsControl("drag");
+      }
+    },
+    [sendWindowsControl]
+  );
 
   // Primary Navigation
   const [activeTab, setActiveTab] = useState<NavTab>("live");
@@ -103,8 +191,27 @@ export function App() {
   const [micLevel, setMicLevel] = useState<number>(0);
   const talkSessionRef = useRef<TalkbackSession | null>(null);
 
-  // 1080P Zoom Modal State
+  // 1080P Zoom Modal & PTZ State
   const [zoomCamera, setZoomCamera] = useState<Camera | null>(null);
+  const [zoomAudioEnabled, setZoomAudioEnabled] = useState<boolean>(true);
+  const [ptzPanelOpen, setPtzPanelOpen] = useState<boolean>(true);
+
+  const handleOpenZoom = useCallback((camera: Camera) => {
+    setZoomAudioEnabled(true);
+    setZoomCamera(camera);
+  }, []);
+
+  const handlePresetsUpdated = useCallback(
+    (cameraId: string, presets: PTZPreset[]) => {
+      setCameras((prev) =>
+        prev.map((c) => (c.id === cameraId ? { ...c, ptz_presets: presets } : c))
+      );
+      setZoomCamera((prev) =>
+        prev && prev.id === cameraId ? { ...prev, ptz_presets: presets } : prev
+      );
+    },
+    []
+  );
 
   // @uiarc/reorderable-list Live Wall & Modal Reordering State
   const [reorderModalOpen, setReorderModalOpen] = useState<boolean>(false);
@@ -332,7 +439,7 @@ export function App() {
 
   // Spacebar Push-To-Talk when 1080P Zoom Modal is open
   useEffect(() => {
-    if (!zoomCamera) return;
+    if (!zoomCamera || !cameraSupportsTalk(zoomCamera)) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (
         e.code === "Space" &&
@@ -471,6 +578,11 @@ export function App() {
     if (n <= 36) return 6;
     return 7;
   }, [gridMode, visibleCameras.length]);
+
+  const gridRows = useMemo(() => {
+    const n = Math.max(visibleCameras.length, 1);
+    return Math.max(1, Math.ceil(n / gridColumns));
+  }, [visibleCameras.length, gridColumns]);
 
   const handleStatusChange = useCallback((cameraId: string, online: boolean) => {
     setOnlineMap((prev) => {
@@ -644,11 +756,52 @@ export function App() {
   return (
     <div className="app-shell">
       {/* Top Navigation Header */}
-      <header className="top-header">
+      <header className="top-header" onMouseDown={handleHeaderMouseDown}>
         <div className="brand-area">
-          <CameraIcon size={20} strokeWidth={1.75} aria-hidden="true" className="brand-icon" />
+          <svg
+            width="24"
+            height="24"
+            viewBox="0 0 64 64"
+            fill="none"
+            aria-hidden="true"
+            className="brand-icon"
+          >
+            <defs>
+              <linearGradient id="fc-hdr-bg" x1="32" y1="4" x2="32" y2="60" gradientUnits="userSpaceOnUse">
+                <stop offset="0" stopColor="#2E3546" />
+                <stop offset="0.5" stopColor="#1B202C" />
+                <stop offset="1" stopColor="#0E1118" />
+              </linearGradient>
+              <linearGradient id="fc-hdr-bezel" x1="16" y1="16" x2="48" y2="48" gradientUnits="userSpaceOnUse">
+                <stop offset="0" stopColor="#7F91AD" />
+                <stop offset="0.5" stopColor="#3E475B" />
+                <stop offset="1" stopColor="#1E2330" />
+              </linearGradient>
+              <radialGradient id="fc-hdr-glass" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(34 34) scale(16)">
+                <stop offset="0" stopColor="#0A1A38" />
+                <stop offset="0.55" stopColor="#12346E" />
+                <stop offset="0.88" stopColor="#1F66C7" />
+                <stop offset="1" stopColor="#0B2044" />
+              </radialGradient>
+              <radialGradient id="fc-hdr-pupil" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(31 31) scale(7.5)">
+                <stop offset="0" stopColor="#050812" />
+                <stop offset="0.7" stopColor="#0A142E" />
+                <stop offset="1" stopColor="#193875" />
+              </radialGradient>
+            </defs>
+            <rect x="4" y="4" width="56" height="56" rx="13" fill="url(#fc-hdr-bg)" stroke="#94ADCF" strokeOpacity="0.32" strokeWidth="1.2" />
+            <circle cx="32" cy="32" r="19" fill="url(#fc-hdr-bezel)" />
+            <circle cx="32" cy="32" r="16.8" fill="#121722" />
+            <circle cx="32" cy="32" r="14.8" fill="url(#fc-hdr-glass)" />
+            <circle cx="32" cy="32" r="11.8" stroke="#6BC6FF" strokeOpacity="0.3" strokeWidth="0.9" />
+            <circle cx="32" cy="32" r="7" fill="url(#fc-hdr-pupil)" stroke="#57B3FF" strokeOpacity="0.5" strokeWidth="1" />
+            <ellipse cx="25.8" cy="25.6" rx="5.2" ry="2.6" transform="rotate(-42 25.8 25.6)" fill="#FFFFFF" fillOpacity="0.5" />
+            <circle cx="29" cy="29" r="1.3" fill="#FFFFFF" fillOpacity="0.88" />
+            <circle cx="49" cy="15" r="3.6" fill="#0F1219" />
+            <circle cx="49" cy="15" r="2.5" fill="#FF3B30" />
+          </svg>
           <div className="brand-text-row">
-            <h1 className="brand-title">FocusCamera 琴房监控与对讲中心</h1>
+            <h1 className="brand-title">FocusCamera 高清监控与 NVR 中心</h1>
             <div className="brand-meta">
               <Badge tone={onlineCount > 0 ? "success" : "neutral"} size="sm">
                 <span>在线 </span>
@@ -710,7 +863,7 @@ export function App() {
             ) : (
               <>
                 <RefreshCw size={14} />
-                <span>{updateStatus?.current_version || "v2.0.0"}</span>
+                <span>{updateStatus?.current_version || "v2.2.0"}</span>
               </>
             )}
           </Button>
@@ -719,15 +872,103 @@ export function App() {
             iconOnly
             onThemeChange={(next) => setTheme(next)}
           />
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => setShutdownModalOpen(true)}
-            title="安全关闭后台服务与所有录像句柄"
-          >
-            <Power size={15} />
-            <span>退出</span>
-          </Button>
+          {!isWindowsDesktop && !isMacDesktop && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setShutdownModalOpen(true)}
+              title="安全关闭后台服务与所有录像句柄"
+            >
+              <Power size={15} />
+              <span>退出</span>
+            </Button>
+          )}
+          {isWindowsDesktop && (
+            <div className="win-window-controls" data-no-drag aria-label="窗口控制">
+              <button
+                type="button"
+                className="win-caption-btn"
+                onClick={() => sendWindowsControl("minimize")}
+                title="最小化"
+                aria-label="最小化"
+              >
+                <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+                  <path
+                    d="M1 5h8"
+                    stroke="currentColor"
+                    strokeWidth="1.2"
+                    strokeLinecap="round"
+                  />
+                </svg>
+              </button>
+              <button
+                type="button"
+                className="win-caption-btn"
+                onClick={() => sendWindowsControl("maximize")}
+                title="最大化 / 还原"
+                aria-label="最大化或还原"
+              >
+                <svg
+                  className="win-caption-btn__icon--maximize"
+                  width="10"
+                  height="10"
+                  viewBox="0 0 10 10"
+                  aria-hidden="true"
+                >
+                  <rect
+                    x="1.5"
+                    y="1.5"
+                    width="7"
+                    height="7"
+                    rx="1"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.2"
+                  />
+                </svg>
+                <svg
+                  className="win-caption-btn__icon--restore"
+                  width="10"
+                  height="10"
+                  viewBox="0 0 10 10"
+                  aria-hidden="true"
+                >
+                  <path
+                    d="M3 3V1.8c0-.44.36-.8.8-.8h4.4c.44 0 .8.36.8.8v4.4c0 .44-.36.8-.8.8H7"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.15"
+                  />
+                  <rect
+                    x="1"
+                    y="3"
+                    width="6"
+                    height="6"
+                    rx="0.9"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.15"
+                  />
+                </svg>
+              </button>
+              <button
+                type="button"
+                className="win-caption-btn win-caption-btn--close"
+                onClick={() => setShutdownModalOpen(true)}
+                title="关闭窗口"
+                aria-label="关闭窗口"
+              >
+                <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+                  <path
+                    d="M1.5 1.5l7 7M8.5 1.5l-7 7"
+                    stroke="currentColor"
+                    strokeWidth="1.2"
+                    strokeLinecap="round"
+                  />
+                </svg>
+              </button>
+            </div>
+          )}
         </div>
       </header>
 
@@ -762,7 +1003,7 @@ export function App() {
                   <EmptyState
                     icon={<Radar width={28} height={28} strokeWidth={1.6} />}
                     title="尚未添加任何监控摄像头"
-                    description="本系统不会预置写死任何摄像头列表。请点击下方按钮扫描当前局域网（如 192.168.1.x），系统将自动发现所有 TP-LINK 摄像头并读取机内琴房名称，供您勾选一键添加。"
+                    description="本系统不会预置写死任何摄像头列表。请点击下方按钮扫描当前局域网（如 192.168.1.x），系统将自动发现支持 RTSP / ONVIF 协议的多品牌摄像头（TP-LINK、海康威视、大华、Tapo、宇视等），供您勾选一键添加。"
                     action={
                       <Button
                         variant="primary"
@@ -798,7 +1039,7 @@ export function App() {
                     />
 
                     <SegmentedControl
-                      label="房间分组筛选"
+                      label="设备分组筛选"
                       value={selectedGroup}
                       onValueChange={(v) => {
                         setSelectedGroup(v);
@@ -814,8 +1055,8 @@ export function App() {
                   <div className="wall-toolbar__right">
                     <div className="wall-search-box">
                       <SearchField
-                        label="搜索房间"
-                        placeholder="搜房号或 IP…"
+                        label="搜索设备"
+                        placeholder="搜名称或 IP…"
                         value={searchText}
                         onValueChange={(val) => {
                           setSearchText(val);
@@ -843,13 +1084,13 @@ export function App() {
                     >
                       {activeRecordingCount > 0 ? (
                         <>
-                          <VideoOff size={15} />
-                          <span>关闭全部自动录像</span>
+                          <VideoOff size={14} />
+                          <span>关闭全部录像</span>
                         </>
                       ) : (
                         <>
-                          <Video size={15} />
-                          <span>开启全部自动录像</span>
+                          <Video size={14} />
+                          <span>开启全部录像</span>
                         </>
                       )}
                     </Button>
@@ -858,9 +1099,9 @@ export function App() {
                       variant="secondary"
                       size="sm"
                       onClick={() => setAudioEnabledMap({})}
-                      title="关闭所有琴房的声音监听"
+                      title="关闭所有设备的声音监听"
                     >
-                      <VolumeX size={15} />
+                      <VolumeX size={14} />
                       <span>全部静音</span>
                     </Button>
 
@@ -868,28 +1109,25 @@ export function App() {
                       variant="secondary"
                       size="sm"
                       onClick={() => setReorderModalOpen(true)}
-                      title="打开 @uiarc/reorderable-list 列表视图调整房间顺序"
+                      title="打开 @uiarc/reorderable-list 列表视图调整监控顺序"
                     >
-                      <ArrowUpDown size={15} />
-                      <span>排序列表</span>
-                    </Button>
-
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      onClick={() => setActiveTab("devices")}
-                    >
-                      <Radar size={15} />
-                      <span>扫描/管理</span>
+                      <ArrowUpDown size={14} />
+                      <span>排序</span>
                     </Button>
                   </div>
                 </section>
 
                 {/* Camera Wall Grid */}
                 <section
-                  className="camera-wall-grid"
+                  className={`camera-wall-grid ${
+                    gridRows > 1 ? "camera-wall-grid--fit-viewport" : ""
+                  }`}
                   style={{
                     gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))`,
+                    gridTemplateRows:
+                      gridRows > 1
+                        ? `repeat(${gridRows}, minmax(0, 1fr))`
+                        : undefined,
                   }}
                   aria-label="实时监控画面矩阵"
                 >
@@ -901,7 +1139,7 @@ export function App() {
                       paused={zoomCamera?.id === cam.id}
                       recordingState={recordingStateMap[cam.id]}
                       audioEnabled={
-                        Boolean(audioEnabledMap[cam.id]) && zoomCamera?.id !== cam.id
+                        Boolean(audioEnabledMap[cam.id]) && !zoomCamera
                       }
                       onToggleAudio={(id) =>
                         setAudioEnabledMap((prev) => ({ ...prev, [id]: !prev[id] }))
@@ -912,9 +1150,7 @@ export function App() {
                       onStartPTT={handleStartPTT}
                       onStopPTT={handleStopPTT}
                       onToggleManualRecord={handleToggleManualRecord}
-                      onOpenZoom={(c) => {
-                        setZoomCamera(c);
-                      }}
+                      onOpenZoom={handleOpenZoom}
                       onRebootCamera={handleRebootCamera}
                       onStatusChange={handleStatusChange}
                       draggableCard
@@ -1014,7 +1250,7 @@ export function App() {
         )}
       </main>
 
-      {/* 1080P HD Zoom & Two-Way Intercom Modal Dialog */}
+      {/* 1080P HD Zoom, PTZ Control & Two-Way Intercom Modal Dialog */}
       <Dialog
         open={Boolean(zoomCamera)}
         onOpenChange={(open) => {
@@ -1023,84 +1259,123 @@ export function App() {
       >
         {zoomCamera && (
           <DialogContent
-            className="zoom-dialog-content"
-            title={`${zoomCamera.name} · 1080P 高清主码流`}
-            description={`设备 IP: ${zoomCamera.ip} · 分组: ${
-              zoomCamera.group || "未分组"
-            } · 按住键盘空格键 (Space) 可直接对讲`}
+            className={`zoom-dialog-content ${
+              ptzPanelOpen ? "zoom-dialog-content--with-ptz" : ""
+            }`}
+            title={`${zoomCamera.name} · 1080P 高清主码流与物理云台控制`}
+            description={
+              cameraSupportsTalk(zoomCamera)
+                ? `设备 IP: ${zoomCamera.ip} · 分组: ${
+                    zoomCamera.group || "默认分组"
+                  } · 方向键/WASD 控制物理云台旋转 · 按住空格键对讲`
+                : `设备 IP: ${zoomCamera.ip} · 分组: ${
+                    zoomCamera.group || "默认分组"
+                  } · 方向键/WASD 控制物理云台旋转`
+            }
           >
             <div className="zoom-modal-body">
-              <div className="zoom-video-wrap">
-                <StreamTile
-                  camera={zoomCamera}
-                  stream="stream1"
-                  recordingState={recordingStateMap[zoomCamera.id]}
-                  audioEnabled={Boolean(audioEnabledMap[zoomCamera.id])}
-                  onToggleAudio={(id) =>
-                    setAudioEnabledMap((prev) => ({ ...prev, [id]: !prev[id] }))
-                  }
-                  talkActive={
-                    talkCamera?.id === zoomCamera.id && talkState !== "closed"
-                  }
-                  talkMode={talkCamera?.id === zoomCamera.id ? talkMode : null}
-                  onToggleTalk={handleToggleTalk}
-                  onStartPTT={handleStartPTT}
-                  onStopPTT={handleStopPTT}
-                  onToggleManualRecord={handleToggleManualRecord}
-                  onRebootCamera={handleRebootCamera}
-                  isModalView
-                />
+              <div
+                className={`zoom-stage-layout ${
+                  ptzPanelOpen ? "zoom-stage-layout--split" : ""
+                }`}
+              >
+                <div className="zoom-video-wrap">
+                  <StreamTile
+                    camera={zoomCamera}
+                    stream="stream1"
+                    recordingState={recordingStateMap[zoomCamera.id]}
+                    audioEnabled={zoomAudioEnabled}
+                    onToggleAudio={() =>
+                      setZoomAudioEnabled((prev) => !prev)
+                    }
+                    talkActive={
+                      talkCamera?.id === zoomCamera.id && talkState !== "closed"
+                    }
+                    talkMode={talkCamera?.id === zoomCamera.id ? talkMode : null}
+                    onToggleTalk={handleToggleTalk}
+                    onStartPTT={handleStartPTT}
+                    onStopPTT={handleStopPTT}
+                    onToggleManualRecord={handleToggleManualRecord}
+                    onRebootCamera={handleRebootCamera}
+                    isModalView
+                  />
+                </div>
+
+                {ptzPanelOpen && (
+                  <PTZControlPanel
+                    camera={zoomCamera}
+                    onPresetsUpdated={handlePresetsUpdated}
+                  />
+                )}
               </div>
 
               <div className="zoom-intercom-bar">
                 <div className="zoom-intercom-bar__left">
-                  <Button
-                    variant={
-                      talkCamera?.id === zoomCamera.id && talkMode === "toggle"
-                        ? "danger"
-                        : "primary"
-                    }
-                    size="md"
-                    onClick={() => handleToggleTalk(zoomCamera)}
-                  >
-                    {talkCamera?.id === zoomCamera.id && talkMode === "toggle" ? (
-                      <>
-                        <PhoneOff size={16} />
-                        <span>挂断持续双向通话</span>
-                      </>
-                    ) : (
-                      <>
-                        <PhoneCall size={16} />
-                        <span>开启持续双向通话</span>
-                      </>
-                    )}
-                  </Button>
+                  {cameraSupportsTalk(zoomCamera) ? (
+                    <>
+                      <Button
+                        variant={
+                          talkCamera?.id === zoomCamera.id && talkMode === "toggle"
+                            ? "danger"
+                            : "primary"
+                        }
+                        size="md"
+                        onClick={() => handleToggleTalk(zoomCamera)}
+                      >
+                        {talkCamera?.id === zoomCamera.id && talkMode === "toggle" ? (
+                          <>
+                            <PhoneOff size={16} />
+                            <span>挂断持续双向通话</span>
+                          </>
+                        ) : (
+                          <>
+                            <PhoneCall size={16} />
+                            <span>开启持续双向通话</span>
+                          </>
+                        )}
+                      </Button>
 
-                  <button
-                    type="button"
-                    className={`ptt-large-btn ${
-                      talkCamera?.id === zoomCamera.id && talkMode === "ptt"
-                        ? "ptt-large-btn--active"
-                        : ""
-                    }`}
-                    onPointerDown={() => handleStartPTT(zoomCamera)}
-                    onPointerUp={() => handleStopPTT(zoomCamera)}
-                    onPointerLeave={() => {
-                      if (talkCamera?.id === zoomCamera.id && talkMode === "ptt") {
-                        handleStopPTT(zoomCamera);
-                      }
-                    }}
-                  >
-                    <Mic size={16} />
-                    <span>
-                      {talkCamera?.id === zoomCamera.id && talkMode === "ptt"
-                        ? "正在对讲中（松开结束）…"
-                        : "按住说话（或按住空格键）"}
-                    </span>
-                  </button>
+                      <button
+                        type="button"
+                        className={`ptt-large-btn ${
+                          talkCamera?.id === zoomCamera.id && talkMode === "ptt"
+                            ? "ptt-large-btn--active"
+                            : ""
+                        }`}
+                        onPointerDown={() => handleStartPTT(zoomCamera)}
+                        onPointerUp={() => handleStopPTT(zoomCamera)}
+                        onPointerLeave={() => {
+                          if (talkCamera?.id === zoomCamera.id && talkMode === "ptt") {
+                            handleStopPTT(zoomCamera);
+                          }
+                        }}
+                      >
+                        <Mic size={16} />
+                        <span>
+                          {talkCamera?.id === zoomCamera.id && talkMode === "ptt"
+                            ? "正在对讲中（松开结束）…"
+                            : "按住说话（或按住空格键）"}
+                        </span>
+                      </button>
+                    </>
+                  ) : (
+                    <Badge tone="neutral" size="sm">
+                      标准 RTSP 监控机位
+                    </Badge>
+                  )}
                 </div>
 
                 <div className="zoom-intercom-bar__right">
+                  <Button
+                    variant={ptzPanelOpen ? "primary" : "secondary"}
+                    size="md"
+                    onClick={() => setPtzPanelOpen((v) => !v)}
+                    title="展开或收起右侧云台方向盘、预置位与电子变倍控制面板"
+                  >
+                    <Compass size={16} />
+                    <span>{ptzPanelOpen ? "收起云台面板" : "展开云台控制"}</span>
+                  </Button>
+
                   {(() => {
                     const recSt = recordingStateMap[zoomCamera.id];
                     const isMan = Boolean(recSt?.active && recSt?.mode === "manual");
@@ -1129,7 +1404,7 @@ export function App() {
                     }}
                   >
                     <Film size={16} />
-                    <span>查看该琴房录像回放</span>
+                    <span>查看该设备录像回放</span>
                   </Button>
                 </div>
               </div>
@@ -1149,12 +1424,12 @@ export function App() {
             <ScrollArea
               maxHeight="68vh"
               className="reorder-modal-scroll"
-              label="琴房监控顺序列表"
+              label="监控画面顺序列表"
             >
               <ReorderableList
                 items={reorderListItems}
                 onReorder={handleReorderFromList}
-                label="琴房监控顺序列表"
+                label="监控画面顺序列表"
               />
             </ScrollArea>
           </DialogContent>
@@ -1326,37 +1601,66 @@ export function App() {
       <Dialog open={shutdownModalOpen} onOpenChange={setShutdownModalOpen}>
         {shutdownModalOpen && (
           <DialogContent
-            title="确认关闭 Focus Camera 监控服务？"
+            className="shutdown-dialog-content"
+            title="关闭或最小化主窗口"
             description={
-              activeRecordingCount > 0
-                ? `当前正在后台录制 ${activeRecordingCount} 路 1080P 监控视频。确认退出后，系统将自动完成当前分片落盘并停止后台录像服务。`
-                : "确认退出后，将安全关闭本地监控与对讲后台服务。"
+              isMacDesktop
+                ? "您可以将主窗口收起到右上角菜单栏托盘继续后台运行，或彻底关闭监控服务。"
+                : "您可以将主窗口收起到右下角系统托盘继续后台运行，或彻底关闭监控服务。"
             }
           >
-            <div className="manual-cam-actions">
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                disabled={shuttingDown}
-                onClick={() => setShutdownModalOpen(false)}
-              >
-                取消
-              </Button>
-              <Button
-                type="button"
-                variant="danger"
-                size="sm"
-                loading={shuttingDown}
-                onClick={async () => {
-                  setShuttingDown(true);
-                  await fetch("/api/shutdown", { method: "POST" }).catch(() => {});
-                  window.close();
-                }}
-              >
-                <Power size={14} />
-                <span>确认安全退出</span>
-              </Button>
+            <div className="modal-form-stack">
+              {activeRecordingCount > 0 && (
+                <Alert
+                  tone="warning"
+                  title={`正在后台录制 ${activeRecordingCount} 路 1080P+音频监控`}
+                >
+                  选择「最小化到系统托盘」不会中断任何录像任务，点击托盘图标即可随时恢复主窗口；若选择「彻底退出并停录」，系统将先安全封存当前录像分片再关闭服务。
+                </Alert>
+              )}
+              <div className="manual-cam-actions manual-cam-actions--split">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  disabled={shuttingDown}
+                  onClick={() => setShutdownModalOpen(false)}
+                >
+                  取消
+                </Button>
+                <div className="manual-cam-actions__right">
+                  {(isWindowsDesktop || isMacDesktop) && (
+                    <Button
+                      type="button"
+                      variant="primary"
+                      size="sm"
+                      disabled={shuttingDown}
+                      onClick={() => {
+                        setShutdownModalOpen(false);
+                        window.webkit?.messageHandlers?.focusWindow?.postMessage("tray");
+                        sendWindowsControl("tray");
+                      }}
+                    >
+                      <span>最小化到系统托盘</span>
+                    </Button>
+                  )}
+                  <Button
+                    type="button"
+                    variant="danger"
+                    size="sm"
+                    loading={shuttingDown}
+                    onClick={async () => {
+                      setShuttingDown(true);
+                      sendWindowsControl("remove-tray");
+                      await fetch("/api/shutdown", { method: "POST" }).catch(() => {});
+                      window.close();
+                    }}
+                  >
+                    <Power size={14} />
+                    <span>彻底退出并停录</span>
+                  </Button>
+                </div>
+              </div>
             </div>
           </DialogContent>
         )}
