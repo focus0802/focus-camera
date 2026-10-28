@@ -769,9 +769,22 @@ export function StreamTile({
                 className={`tile-ctrl-btn ${
                   talkActive && talkMode === "ptt" ? "tile-ctrl-btn--talk" : ""
                 }`}
-                onPointerDown={() => onStartPTT(camera)}
-                onPointerUp={() => onStopPTT(camera)}
-                onPointerLeave={() => {
+                onPointerDown={(e) => {
+                  if (e.button !== 0) return;
+                  e.stopPropagation();
+                  e.currentTarget.setPointerCapture(e.pointerId);
+                  onStartPTT(camera);
+                }}
+                onPointerUp={(e) => {
+                  if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+                    e.currentTarget.releasePointerCapture(e.pointerId);
+                  }
+                  onStopPTT(camera);
+                }}
+                onPointerCancel={() => {
+                  if (talkActive && talkMode === "ptt") onStopPTT(camera);
+                }}
+                onLostPointerCapture={() => {
                   if (talkActive && talkMode === "ptt") onStopPTT(camera);
                 }}
                 title="按住说话，松开结束对讲"

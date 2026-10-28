@@ -3,20 +3,24 @@ import {
   ArrowUpDown,
   Camera as CameraIcon,
   Compass,
-  Download,
   Film,
+  Maximize2,
   Mic,
+  Minimize2,
   PhoneCall,
   PhoneOff,
   Power,
   Radar,
   RefreshCw,
-  ShieldCheck,
+  Search,
+  Settings,
+  SlidersHorizontal,
   Sparkles,
   Square,
   Video,
   VideoOff,
   VolumeX,
+  X,
 } from "lucide-react";
 import {
   cameraSupportsTalk,
@@ -25,6 +29,7 @@ import {
   type RecordingConfig,
   type RecordingState,
   type RecordingsPayload,
+  type SystemSettingsTab,
   type UpdateStatus,
 } from "./types";
 import { TalkbackSession } from "./lib/audio";
@@ -32,19 +37,19 @@ import { StreamTile } from "./components/StreamTile";
 import { PTZControlPanel } from "./components/PTZControlPanel";
 import { PlaybackView } from "./components/PlaybackView";
 import { DeviceManagerView } from "./components/DeviceManagerView";
+import { SystemSettingsModal } from "./components/SystemSettingsModal";
 import SegmentedControl from "./components/arc/segmented-control/segmented-control";
 import { Tabs, TabsList, TabsTrigger } from "./components/arc/tabs/tabs";
 import { Pagination } from "./components/arc/pagination/pagination";
 import { AnimatedCounter } from "./components/arc/animated-counter/animated-counter";
 import { ScrollArea } from "./components/arc/scroll-area/scroll-area";
-import { Input } from "./components/arc/input/input";
 import { Alert } from "./components/arc/alert/alert";
-import { Progress } from "./components/arc/progress/progress";
 import { Button } from "./components/arc/button/button";
 import { Badge } from "./components/arc/badge/badge";
 import { SearchField } from "./components/arc/search-field/search-field";
 import { EmptyState } from "./components/arc/empty-state/empty-state";
 import { Dialog, DialogContent } from "./components/arc/dialog/dialog";
+import { Switch } from "./components/arc/switch/switch";
 import { ThemeSwitch, type Theme } from "./components/arc/theme-switch/theme-switch";
 import {
   ReorderableList,
@@ -85,13 +90,12 @@ export function App() {
     return (
       window.__FOCUS_PLATFORM__ === "windows" ||
       params.get("desktop") === "windows" ||
-      Boolean(window.chrome?.webview?.postMessage) ||
-      (/Windows/i.test(navigator.userAgent) && !isMacDesktop)
+      Boolean(window.chrome?.webview?.postMessage)
     );
-  }, [isMacDesktop]);
+  }, []);
 
   const sendWindowsControl = useCallback(
-    (action: "drag" | "minimize" | "tray" | "remove-tray" | "maximize" | "close") => {
+    (action: "minimize" | "tray" | "remove-tray" | "close") => {
       if (window.chrome?.webview?.postMessage) {
         window.chrome.webview.postMessage(
           JSON.stringify({
@@ -138,28 +142,6 @@ export function App() {
     }
   }, [theme]);
 
-  const handleHeaderMouseDown = useCallback(
-    (e: React.MouseEvent<HTMLElement>) => {
-      if (e.button !== 0) return;
-      const target = e.target as HTMLElement | null;
-      if (!target) return;
-      if (
-        target.closest(
-          'button, a, input, select, textarea, [role="tab"], [role="button"], [role="switch"], [data-no-drag]'
-        )
-      ) {
-        return;
-      }
-      window.webkit?.messageHandlers?.focusWindow?.postMessage("drag");
-      if (e.detail === 2) {
-        sendWindowsControl("maximize");
-      } else {
-        sendWindowsControl("drag");
-      }
-    },
-    [sendWindowsControl]
-  );
-
   // Primary Navigation
   const [activeTab, setActiveTab] = useState<NavTab>("live");
 
@@ -182,6 +164,60 @@ export function App() {
   const [searchText, setSearchText] = useState<string>("");
   const [currentPage, setCurrentPage] = useState<number>(0);
 
+  // Space-Maximizing Wall Modes: Floating Control Drawer, Immersive Auto-Hide & Command Palette
+  const [controlDrawerOpen, setControlDrawerOpen] = useState<boolean>(false);
+  const [commandModalOpen, setCommandModalOpen] = useState<boolean>(false);
+  const [commandQuery, setCommandQuery] = useState<string>("");
+  const [commandSelectedIndex, setCommandSelectedIndex] = useState<number>(0);
+  const [immersiveMode, setImmersiveMode] = useState<boolean>(
+    () => localStorage.getItem("focus_immersive_wall") === "true"
+  );
+  const [idleAutoHide, setIdleAutoHide] = useState<boolean>(
+    () => localStorage.getItem("focus_idle_autohide") === "true"
+  );
+  const [headerHovered, setHeaderHovered] = useState<boolean>(false);
+  const [isUserIdle, setIsUserIdle] = useState<boolean>(false);
+  const drawerRef = useRef<HTMLDivElement | null>(null);
+  const drawerTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const headerHoverTimeoutRef = useRef<number | undefined>(undefined);
+
+  useEffect(() => {
+    localStorage.setItem("focus_immersive_wall", String(immersiveMode));
+  }, [immersiveMode]);
+
+  useEffect(() => {
+    localStorage.setItem("focus_idle_autohide", String(idleAutoHide));
+  }, [idleAutoHide]);
+
+  useEffect(() => {
+    if (activeTab !== "live") {
+      setControlDrawerOpen(false);
+    }
+  }, [activeTab]);
+
+  // Light dismiss for floating control drawer
+  useEffect(() => {
+    if (!controlDrawerOpen) return;
+    const onPointerDown = (e: PointerEvent) => {
+      const target = e.target as Node | null;
+      if (!target) return;
+      if (drawerRef.current?.contains(target)) return;
+      if (drawerTriggerRef.current?.contains(target)) return;
+      setControlDrawerOpen(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setControlDrawerOpen(false);
+      }
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [controlDrawerOpen]);
+
   // Audio Monitoring & Two-way Talkback State
   const [audioEnabledMap, setAudioEnabledMap] = useState<Record<string, boolean>>({});
   const [talkCamera, setTalkCamera] = useState<Camera | null>(null);
@@ -190,6 +226,7 @@ export function App() {
   const [talkMessage, setTalkMessage] = useState<string>("");
   const [micLevel, setMicLevel] = useState<number>(0);
   const talkSessionRef = useRef<TalkbackSession | null>(null);
+  const talkMetaRef = useRef<{ cameraId: string; mode: "toggle" | "ptt" } | null>(null);
 
   // 1080P Zoom Modal & PTZ State
   const [zoomCamera, setZoomCamera] = useState<Camera | null>(null);
@@ -215,14 +252,25 @@ export function App() {
 
   // @uiarc/reorderable-list Live Wall & Modal Reordering State
   const [reorderModalOpen, setReorderModalOpen] = useState<boolean>(false);
-  const [devicePolicyModalOpen, setDevicePolicyModalOpen] = useState<boolean>(false);
+  const [settingsModalOpen, setSettingsModalOpen] = useState<boolean>(false);
+  const [settingsTab, setSettingsTab] = useState<SystemSettingsTab>("general");
   const [shutdownModalOpen, setShutdownModalOpen] = useState<boolean>(false);
   const [shuttingDown, setShuttingDown] = useState<boolean>(false);
-  const [updateModalOpen, setUpdateModalOpen] = useState<boolean>(false);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [updateUrlInput, setUpdateUrlInput] = useState<string>("");
   const [checkingUpdate, setCheckingUpdate] = useState<boolean>(false);
   const [applyingUpdate, setApplyingUpdate] = useState<boolean>(false);
+
+  const openSystemSettings = useCallback(
+    (tab: SystemSettingsTab = "general") => {
+      if (updateStatus?.update_url && !updateUrlInput) {
+        setUpdateUrlInput(updateStatus.update_url);
+      }
+      setSettingsTab(tab);
+      setSettingsModalOpen(true);
+    },
+    [updateStatus?.update_url, updateUrlInput]
+  );
   const [movedCameraId, setMovedCameraId] = useState<string | null>(null);
   const tileElementsRef = useRef(new Map<string, HTMLElement>());
   const handleElementsRef = useRef(new Map<string, HTMLButtonElement>());
@@ -303,7 +351,7 @@ export function App() {
       st === "verifying" ||
       st === "applying" ||
       st === "restarting";
-    if (!isBusy && !updateModalOpen) return;
+    if (!isBusy && !(settingsModalOpen && settingsTab === "update")) return;
     const timer = window.setInterval(async () => {
       try {
         const res = await fetch("/api/update/status");
@@ -319,7 +367,7 @@ export function App() {
       }
     }, isBusy ? 500 : 3000);
     return () => window.clearInterval(timer);
-  }, [updateStatus?.state, updateModalOpen]);
+  }, [updateStatus?.state, settingsModalOpen, settingsTab]);
 
   const handleCheckUpdate = useCallback(async () => {
     setCheckingUpdate(true);
@@ -374,6 +422,7 @@ export function App() {
       talkSessionRef.current.stop();
       talkSessionRef.current = null;
     }
+    talkMetaRef.current = null;
     setTalkCamera(null);
     setTalkMode(null);
     setTalkState("closed");
@@ -386,6 +435,7 @@ export function App() {
         talkSessionRef.current.stop();
         talkSessionRef.current = null;
       }
+      talkMetaRef.current = { cameraId: camera.id, mode };
       setTalkCamera(camera);
       setTalkMode(mode);
       setTalkState("connecting");
@@ -396,6 +446,7 @@ export function App() {
           setTalkState(st);
           setTalkMessage(msg);
           if (st === "closed") {
+            talkMetaRef.current = null;
             setTalkCamera(null);
             setTalkMode(null);
             setMicLevel(0);
@@ -422,7 +473,12 @@ export function App() {
 
   const handleStartPTT = useCallback(
     (camera: Camera) => {
-      if (talkCamera?.id === camera.id && talkMode === "toggle") return;
+      if (
+        (talkMetaRef.current?.cameraId === camera.id && talkMetaRef.current?.mode === "toggle") ||
+        (talkCamera?.id === camera.id && talkMode === "toggle")
+      ) {
+        return;
+      }
       startTalkback(camera, "ptt");
     },
     [talkCamera, talkMode, startTalkback]
@@ -430,7 +486,10 @@ export function App() {
 
   const handleStopPTT = useCallback(
     (camera: Camera) => {
-      if (talkCamera?.id === camera.id && talkMode === "ptt") {
+      if (
+        (talkMetaRef.current?.cameraId === camera.id && talkMetaRef.current?.mode === "ptt") ||
+        (talkCamera?.id === camera.id && talkMode === "ptt")
+      ) {
         stopTalkback();
       }
     },
@@ -753,55 +812,269 @@ export function App() {
     [persistCameraOrder]
   );
 
+  // Idle auto-hide detection for Live Wall
+  useEffect(() => {
+    if (activeTab !== "live" || !idleAutoHide || cameras.length === 0) {
+      setIsUserIdle(false);
+      return;
+    }
+    let timer: number | undefined;
+    const resetIdle = () => {
+      setIsUserIdle(false);
+      if (timer) window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        setIsUserIdle(true);
+      }, 3600);
+    };
+    resetIdle();
+    window.addEventListener("pointermove", resetIdle, { passive: true });
+    window.addEventListener("pointerdown", resetIdle, { passive: true });
+    window.addEventListener("keydown", resetIdle);
+    window.addEventListener("wheel", resetIdle, { passive: true });
+    return () => {
+      if (timer) window.clearTimeout(timer);
+      window.removeEventListener("pointermove", resetIdle);
+      window.removeEventListener("pointerdown", resetIdle);
+      window.removeEventListener("keydown", resetIdle);
+      window.removeEventListener("wheel", resetIdle);
+    };
+  }, [activeTab, idleAutoHide, cameras.length]);
+
+  const anyModalOpen =
+    Boolean(zoomCamera) ||
+    commandModalOpen ||
+    reorderModalOpen ||
+    settingsModalOpen ||
+    shutdownModalOpen;
+
+  const isWallHeaderFloating =
+    activeTab === "live" &&
+    cameras.length > 0 &&
+    (immersiveMode || (idleAutoHide && isUserIdle));
+
+  const isWallHeaderVisible =
+    !isWallHeaderFloating ||
+    headerHovered ||
+    controlDrawerOpen ||
+    anyModalOpen;
+
+  const revealHeader = useCallback(() => {
+    if (headerHoverTimeoutRef.current) {
+      window.clearTimeout(headerHoverTimeoutRef.current);
+      headerHoverTimeoutRef.current = undefined;
+    }
+    setHeaderHovered(true);
+  }, []);
+
+  const scheduleHideHeader = useCallback(() => {
+    if (headerHoverTimeoutRef.current) {
+      window.clearTimeout(headerHoverTimeoutRef.current);
+    }
+    headerHoverTimeoutRef.current = window.setTimeout(() => {
+      setHeaderHovered(false);
+    }, 320);
+  }, []);
+
+  // Global keyboard shortcuts for Live Wall (Cmd/Ctrl+K, /, F, V, M, 1~5, [ / ])
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setCommandQuery("");
+        setCommandSelectedIndex(0);
+        setCommandModalOpen((prev) => !prev);
+        return;
+      }
+
+      const target = e.target as HTMLElement | null;
+      const isEditable =
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        Boolean(target?.isContentEditable);
+
+      if (isEditable || anyModalOpen) return;
+
+      if (e.key === "/") {
+        e.preventDefault();
+        setCommandQuery(searchText);
+        setCommandSelectedIndex(0);
+        setCommandModalOpen(true);
+        return;
+      }
+
+      if (activeTab !== "live" || cameras.length === 0) return;
+
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+      switch (e.key.toLowerCase()) {
+        case "f":
+          e.preventDefault();
+          setImmersiveMode((prev) => !prev);
+          break;
+        case "v":
+          e.preventDefault();
+          setControlDrawerOpen((prev) => !prev);
+          break;
+        case "m":
+          e.preventDefault();
+          setAudioEnabledMap({});
+          break;
+        case "1":
+          e.preventDefault();
+          setGridMode("all");
+          setCurrentPage(0);
+          break;
+        case "2":
+          e.preventDefault();
+          setGridMode("36");
+          setCurrentPage(0);
+          break;
+        case "3":
+          e.preventDefault();
+          setGridMode("40");
+          setCurrentPage(0);
+          break;
+        case "4":
+          e.preventDefault();
+          setGridMode("16");
+          setCurrentPage(0);
+          break;
+        case "5":
+          e.preventDefault();
+          setGridMode("9");
+          setCurrentPage(0);
+          break;
+        case "[":
+        case "pageup":
+          if (gridMode !== "all" && totalPages > 1) {
+            e.preventDefault();
+            setCurrentPage((p) => Math.max(0, p - 1));
+          }
+          break;
+        case "]":
+        case "pagedown":
+          if (gridMode !== "all" && totalPages > 1) {
+            e.preventDefault();
+            setCurrentPage((p) => Math.min(totalPages - 1, p + 1));
+          }
+          break;
+        case "escape":
+          if (controlDrawerOpen) {
+            setControlDrawerOpen(false);
+          } else if (immersiveMode) {
+            setImmersiveMode(false);
+          }
+          break;
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [
+    activeTab,
+    anyModalOpen,
+    cameras.length,
+    controlDrawerOpen,
+    gridMode,
+    immersiveMode,
+    searchText,
+    totalPages,
+  ]);
+
+  const commandMatchedCameras = useMemo(() => {
+    const q = commandQuery.trim().toLowerCase();
+    if (!q) return cameras;
+    return cameras.filter(
+      (c) =>
+        c.name.toLowerCase().includes(q) ||
+        c.ip.toLowerCase().includes(q) ||
+        (c.group || "").toLowerCase().includes(q)
+    );
+  }, [cameras, commandQuery]);
+
+  const safeCommandIndex = Math.min(
+    commandSelectedIndex,
+    Math.max(0, commandMatchedCameras.length - 1)
+  );
+
+  const gridModeShortLabel = useMemo(() => {
+    if (gridMode === "all") return `全览 (${filteredCameras.length})`;
+    return `${gridMode}宫格`;
+  }, [gridMode, filteredCameras.length]);
+
+  const hasActiveFilter =
+    selectedGroup !== "all" || searchText.trim().length > 0;
+
   return (
-    <div className="app-shell">
+    <div
+      className={`app-shell ${
+        isWallHeaderFloating ? "app-shell--immersive-live" : ""
+      } ${!isWallHeaderVisible ? "app-shell--header-hidden" : ""}`}
+    >
+      {/* Top-Edge Hover Sensor for Immersive TV Wall Mode */}
+      {isWallHeaderFloating && !isWallHeaderVisible && (
+        <div
+          className="immersive-top-sensor"
+          onPointerEnter={revealHeader}
+          aria-hidden="true"
+        />
+      )}
+
       {/* Top Navigation Header */}
-      <header className="top-header" onMouseDown={handleHeaderMouseDown}>
+      <header
+        className={`top-header ${
+          isWallHeaderFloating ? "top-header--floating" : ""
+        } ${!isWallHeaderVisible ? "top-header--hidden" : ""}`}
+        onPointerEnter={revealHeader}
+        onPointerLeave={scheduleHideHeader}
+      >
         <div className="brand-area">
           <svg
-            width="24"
-            height="24"
+            width="28"
+            height="28"
             viewBox="0 0 64 64"
             fill="none"
             aria-hidden="true"
             className="brand-icon"
           >
             <defs>
-              <linearGradient id="fc-hdr-bg" x1="32" y1="4" x2="32" y2="60" gradientUnits="userSpaceOnUse">
-                <stop offset="0" stopColor="#2E3546" />
-                <stop offset="0.5" stopColor="#1B202C" />
-                <stop offset="1" stopColor="#0E1118" />
+              <linearGradient id="fc-hdr-bg" x1="32" y1="1.5" x2="32" y2="62.5" gradientUnits="userSpaceOnUse">
+                <stop offset="0" stopColor="#364056" />
+                <stop offset="0.48" stopColor="#1E2534" />
+                <stop offset="1" stopColor="#0F131C" />
               </linearGradient>
-              <linearGradient id="fc-hdr-bezel" x1="16" y1="16" x2="48" y2="48" gradientUnits="userSpaceOnUse">
-                <stop offset="0" stopColor="#7F91AD" />
-                <stop offset="0.5" stopColor="#3E475B" />
-                <stop offset="1" stopColor="#1E2330" />
+              <linearGradient id="fc-hdr-bezel" x1="10" y1="10" x2="54" y2="54" gradientUnits="userSpaceOnUse">
+                <stop offset="0" stopColor="#93A8C8" />
+                <stop offset="0.5" stopColor="#47536B" />
+                <stop offset="1" stopColor="#202636" />
               </linearGradient>
-              <radialGradient id="fc-hdr-glass" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(34 34) scale(16)">
-                <stop offset="0" stopColor="#0A1A38" />
-                <stop offset="0.55" stopColor="#12346E" />
-                <stop offset="0.88" stopColor="#1F66C7" />
-                <stop offset="1" stopColor="#0B2044" />
+              <radialGradient id="fc-hdr-glass" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(34.5 34.5) scale(19.5)">
+                <stop offset="0" stopColor="#0C2147" />
+                <stop offset="0.52" stopColor="#16438C" />
+                <stop offset="0.86" stopColor="#297EF6" />
+                <stop offset="1" stopColor="#0E2A5C" />
               </radialGradient>
-              <radialGradient id="fc-hdr-pupil" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(31 31) scale(7.5)">
+              <radialGradient id="fc-hdr-pupil" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(31 31) scale(9)">
                 <stop offset="0" stopColor="#050812" />
-                <stop offset="0.7" stopColor="#0A142E" />
-                <stop offset="1" stopColor="#193875" />
+                <stop offset="0.7" stopColor="#0B1736" />
+                <stop offset="1" stopColor="#1F4690" />
               </radialGradient>
             </defs>
-            <rect x="4" y="4" width="56" height="56" rx="13" fill="url(#fc-hdr-bg)" stroke="#94ADCF" strokeOpacity="0.32" strokeWidth="1.2" />
-            <circle cx="32" cy="32" r="19" fill="url(#fc-hdr-bezel)" />
-            <circle cx="32" cy="32" r="16.8" fill="#121722" />
-            <circle cx="32" cy="32" r="14.8" fill="url(#fc-hdr-glass)" />
-            <circle cx="32" cy="32" r="11.8" stroke="#6BC6FF" strokeOpacity="0.3" strokeWidth="0.9" />
-            <circle cx="32" cy="32" r="7" fill="url(#fc-hdr-pupil)" stroke="#57B3FF" strokeOpacity="0.5" strokeWidth="1" />
-            <ellipse cx="25.8" cy="25.6" rx="5.2" ry="2.6" transform="rotate(-42 25.8 25.6)" fill="#FFFFFF" fillOpacity="0.5" />
-            <circle cx="29" cy="29" r="1.3" fill="#FFFFFF" fillOpacity="0.88" />
-            <circle cx="49" cy="15" r="3.6" fill="#0F1219" />
-            <circle cx="49" cy="15" r="2.5" fill="#FF3B30" />
+            <rect x="1.5" y="1.5" width="61" height="61" rx="14.5" fill="url(#fc-hdr-bg)" stroke="#8AB8E6" strokeOpacity="0.48" strokeWidth="1.5" />
+            <path d="M7.5 15V10.8C7.5 8.97746 8.97746 7.5 10.8 7.5H15M7.5 49V53.2C7.5 55.0225 8.97746 56.5 10.8 56.5H15M56.5 49V53.2C56.5 55.0225 55.0225 56.5 53.2 56.5H49" stroke="#8AB8E6" strokeOpacity="0.34" strokeWidth="1.6" strokeLinecap="round" />
+            <circle cx="32" cy="32" r="22.4" fill="url(#fc-hdr-bezel)" />
+            <circle cx="32" cy="32" r="19.8" fill="#111622" />
+            <circle cx="32" cy="32" r="17.6" fill="url(#fc-hdr-glass)" />
+            <circle cx="32" cy="32" r="13.8" stroke="#76CCFF" strokeOpacity="0.38" strokeWidth="0.95" />
+            <circle cx="32" cy="32" r="8.4" fill="url(#fc-hdr-pupil)" stroke="#62BAFF" strokeOpacity="0.55" strokeWidth="1.1" />
+            <ellipse cx="24.8" cy="24.5" rx="6.2" ry="3.1" transform="rotate(-42 24.8 24.5)" fill="#FFFFFF" fillOpacity="0.52" />
+            <circle cx="28.4" cy="28.4" r="1.5" fill="#FFFFFF" fillOpacity="0.9" />
+            <circle cx="51.2" cy="12.8" r="4.1" fill="#0E121A" />
+            <circle cx="51.2" cy="12.8" r="2.9" fill="#FF3B30" />
+            <circle cx="50.4" cy="12" r="0.8" fill="#FFE5E5" />
           </svg>
           <div className="brand-text-row">
-            <h1 className="brand-title">FocusCamera 高清监控与 NVR 中心</h1>
+            <h1 className="brand-title">FocusCamera</h1>
             <div className="brand-meta">
               <Badge tone={onlineCount > 0 ? "success" : "neutral"} size="sm">
                 <span>在线 </span>
@@ -812,11 +1085,11 @@ export function App() {
               </Badge>
               {activeRecordingCount > 0 && (
                 <Badge tone="danger" size="sm">
-                  <span>正在录制 </span>
+                  <span>录制 </span>
                   <span className="inline-counter">
                     <AnimatedCounter value={activeRecordingCount} />
                   </span>
-                  <span> 路 1080P+音频</span>
+                  <span> 路</span>
                 </Badge>
               )}
               {talkCamera && (
@@ -838,34 +1111,107 @@ export function App() {
               <TabsTrigger value="playback">
                 录像回放 ({recordingsPayload?.segment_count ?? 0})
               </TabsTrigger>
-              <TabsTrigger value="devices">设备扫描与管理</TabsTrigger>
+              <TabsTrigger value="devices">设备管理</TabsTrigger>
             </TabsList>
           </Tabs>
         </nav>
 
         <div className="header-actions">
+          {activeTab === "live" && cameras.length > 0 && (
+            <div className="header-live-controls">
+              {hasActiveFilter && (
+                <button
+                  type="button"
+                  className="active-filter-chip"
+                  onClick={() => {
+                    setSelectedGroup("all");
+                    setSearchText("");
+                    setCurrentPage(0);
+                  }}
+                  title="点击一键清除当前分组与关键字筛选"
+                >
+                  <span>
+                    {selectedGroup !== "all" ? selectedGroup : ""}
+                    {selectedGroup !== "all" && searchText.trim() ? " · " : ""}
+                    {searchText.trim() ? `"${searchText.trim()}"` : ""}
+                  </span>
+                  <X size={12} aria-hidden="true" />
+                </button>
+              )}
+
+              {gridMode !== "all" && totalPages > 1 && (
+                <div className="header-pagination-wrap">
+                  <Pagination
+                    page={safePage + 1}
+                    pageCount={totalPages}
+                    onPageChange={(p) => setCurrentPage(p - 1)}
+                    label="监控画面分页导航"
+                  />
+                </div>
+              )}
+
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => {
+                  setCommandQuery(searchText);
+                  setCommandSelectedIndex(0);
+                  setCommandModalOpen(true);
+                }}
+                title="快速搜索设备或执行大屏指令（快捷键 ⌘K 或 /）"
+              >
+                <Search size={13} />
+                <span>搜索</span>
+                <kbd className="header-kbd">/</kbd>
+              </Button>
+
+              <Button
+                ref={drawerTriggerRef}
+                variant={controlDrawerOpen || hasActiveFilter ? "primary" : "secondary"}
+                size="sm"
+                onClick={() => setControlDrawerOpen((prev) => !prev)}
+                title="展开或收起宫格切换、分组筛选与批量控制抽屉（快捷键 V）"
+                aria-expanded={controlDrawerOpen}
+              >
+                <SlidersHorizontal size={13} />
+                <span>{gridModeShortLabel}</span>
+              </Button>
+
+              <Button
+                variant={immersiveMode ? "primary" : "ghost"}
+                size="sm"
+                onClick={() => setImmersiveMode((prev) => !prev)}
+                title={
+                  immersiveMode
+                    ? "退出沉浸电视墙模式，恢复常驻顶栏（快捷键 F 或 Esc）"
+                    : "开启沉浸电视墙模式：自动隐藏顶栏，鼠标触顶唤出，100% 满屏显示（快捷键 F）"
+                }
+              >
+                {immersiveMode ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+                <span>{immersiveMode ? "退出沉浸" : "沉浸"}</span>
+              </Button>
+            </div>
+          )}
+
+          {updateStatus?.has_update && (
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={() => openSystemSettings("update")}
+              title="发现可用新版本，点击进入系统设置执行一键受控热更新"
+            >
+              <Sparkles size={14} />
+              <span>发现新版本 {updateStatus.latest_version}</span>
+            </Button>
+          )}
           <Button
-            variant={updateStatus?.has_update ? "primary" : "ghost"}
+            variant="ghost"
             size="sm"
-            onClick={() => {
-              if (updateStatus?.update_url && !updateUrlInput) {
-                setUpdateUrlInput(updateStatus.update_url);
-              }
-              setUpdateModalOpen(true);
-            }}
-            title="查看当前软件版本、配置更新源并执行一键受控热更新"
+            onClick={() => openSystemSettings("general")}
+            title={`系统设置（开机自启 · 录像与存储策略 · 版本 ${updateStatus?.current_version || "v2.3.0"}）`}
           >
-            {updateStatus?.has_update ? (
-              <>
-                <Sparkles size={14} />
-                <span>发现新版本 {updateStatus.latest_version}</span>
-              </>
-            ) : (
-              <>
-                <RefreshCw size={14} />
-                <span>{updateStatus?.current_version || "v2.2.0"}</span>
-              </>
-            )}
+            <Settings size={14} />
+            <span>系统设置</span>
           </Button>
           <ThemeSwitch
             theme={theme}
@@ -903,56 +1249,6 @@ export function App() {
               </button>
               <button
                 type="button"
-                className="win-caption-btn"
-                onClick={() => sendWindowsControl("maximize")}
-                title="最大化 / 还原"
-                aria-label="最大化或还原"
-              >
-                <svg
-                  className="win-caption-btn__icon--maximize"
-                  width="10"
-                  height="10"
-                  viewBox="0 0 10 10"
-                  aria-hidden="true"
-                >
-                  <rect
-                    x="1.5"
-                    y="1.5"
-                    width="7"
-                    height="7"
-                    rx="1"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.2"
-                  />
-                </svg>
-                <svg
-                  className="win-caption-btn__icon--restore"
-                  width="10"
-                  height="10"
-                  viewBox="0 0 10 10"
-                  aria-hidden="true"
-                >
-                  <path
-                    d="M3 3V1.8c0-.44.36-.8.8-.8h4.4c.44 0 .8.36.8.8v4.4c0 .44-.36.8-.8.8H7"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.15"
-                  />
-                  <rect
-                    x="1"
-                    y="3"
-                    width="6"
-                    height="6"
-                    rx="0.9"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.15"
-                  />
-                </svg>
-              </button>
-              <button
-                type="button"
                 className="win-caption-btn win-caption-btn--close"
                 onClick={() => setShutdownModalOpen(true)}
                 title="关闭窗口"
@@ -971,6 +1267,124 @@ export function App() {
           )}
         </div>
       </header>
+
+      {/* Floating Glassmorphic Live Wall Control Popover (Zero Vertical Layout Shift) */}
+      {activeTab === "live" && cameras.length > 0 && controlDrawerOpen && (
+        <section
+          ref={drawerRef}
+          className="wall-control-drawer"
+          aria-label="大屏视图与批量控制抽屉"
+          onPointerEnter={revealHeader}
+        >
+          <div className="wall-control-drawer__top-bar">
+            <div className="wall-search-box wall-search-box--flex">
+              <SearchField
+                label="搜索设备"
+                placeholder="实时过滤名称、分组或 IP…"
+                value={searchText}
+                onValueChange={(val) => {
+                  setSearchText(val);
+                  setCurrentPage(0);
+                }}
+              />
+            </div>
+
+            <div className="wall-control-drawer__actions">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() =>
+                  void handleToggleAllAutoRecord(activeRecordingCount === 0)
+                }
+                title="一键开启或关闭所有摄像头的后台 1080P 自动录像"
+              >
+                {activeRecordingCount > 0 ? (
+                  <>
+                    <VideoOff size={14} />
+                    <span>关闭全部录像</span>
+                  </>
+                ) : (
+                  <>
+                    <Video size={14} />
+                    <span>开启全部录像</span>
+                  </>
+                )}
+              </Button>
+
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => setAudioEnabledMap({})}
+                title="关闭所有设备的声音监听（快捷键 M）"
+              >
+                <VolumeX size={14} />
+                <span>全部静音 (M)</span>
+              </Button>
+
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => {
+                  setControlDrawerOpen(false);
+                  setReorderModalOpen(true);
+                }}
+                title="打开 @uiarc/reorderable-list 列表视图调整监控顺序"
+              >
+                <ArrowUpDown size={14} />
+                <span>排序</span>
+              </Button>
+            </div>
+          </div>
+
+          <div className="wall-control-drawer__field">
+            <span className="wall-control-drawer__label">宫格布局 (1~5)</span>
+            <SegmentedControl
+              label="画面布局切换"
+              value={gridMode}
+              onValueChange={(v) => {
+                setGridMode(v as GridMode);
+                setCurrentPage(0);
+              }}
+              options={[
+                { value: "all", label: `全览 (${filteredCameras.length})` },
+                { value: "36", label: "36宫格" },
+                { value: "40", label: "40宫格" },
+                { value: "16", label: "16宫格" },
+                { value: "9", label: "9宫格" },
+              ]}
+            />
+          </div>
+
+          <div className="wall-control-drawer__field">
+            <span className="wall-control-drawer__label">设备分组筛选</span>
+            <SegmentedControl
+              label="设备分组筛选"
+              value={selectedGroup}
+              onValueChange={(v) => {
+                setSelectedGroup(v);
+                setCurrentPage(0);
+              }}
+              options={groups.map((g) => ({
+                value: g,
+                label: g === "all" ? "全部分组" : g,
+              }))}
+            />
+          </div>
+
+          <div className="wall-control-drawer__footer">
+            <Switch
+              checked={immersiveMode}
+              onCheckedChange={setImmersiveMode}
+              label="沉浸电视墙模式（隐藏顶栏，鼠标触顶唤出 · F）"
+            />
+            <Switch
+              checked={idleAutoHide}
+              onCheckedChange={setIdleAutoHide}
+              label="空闲 4 秒自动隐身顶栏"
+            />
+          </div>
+        </section>
+      )}
 
       {/* Active Intercom Floating Status Bar */}
       {talkCamera && (
@@ -1002,8 +1416,7 @@ export function App() {
                 <div className="panel-card empty-wall-card">
                   <EmptyState
                     icon={<Radar width={28} height={28} strokeWidth={1.6} />}
-                    title="尚未添加任何监控摄像头"
-                    description="本系统不会预置写死任何摄像头列表。请点击下方按钮扫描当前局域网（如 192.168.1.x），系统将自动发现支持 RTSP / ONVIF 协议的多品牌摄像头（TP-LINK、海康威视、大华、Tapo、宇视等），供您勾选一键添加。"
+                    title="尚未添加监控摄像头"
                     action={
                       <Button
                         variant="primary"
@@ -1011,7 +1424,7 @@ export function App() {
                         onClick={() => setActiveTab("devices")}
                       >
                         <Radar size={18} />
-                        <span>前往扫描并添加局域网摄像头</span>
+                        <span>扫描并添加摄像头</span>
                       </Button>
                     }
                   />
@@ -1019,105 +1432,7 @@ export function App() {
               </div>
             ) : (
               <div className="live-wall-layout">
-                {/* Live Wall Toolbar */}
-                <section className="wall-toolbar">
-                  <div className="wall-toolbar__left">
-                    <SegmentedControl
-                      label="画面布局切换"
-                      value={gridMode}
-                      onValueChange={(v) => {
-                        setGridMode(v as GridMode);
-                        setCurrentPage(0);
-                      }}
-                      options={[
-                        { value: "all", label: `全览 (${filteredCameras.length})` },
-                        { value: "36", label: "36宫格" },
-                        { value: "40", label: "40宫格" },
-                        { value: "16", label: "16宫格" },
-                        { value: "9", label: "9宫格" },
-                      ]}
-                    />
-
-                    <SegmentedControl
-                      label="设备分组筛选"
-                      value={selectedGroup}
-                      onValueChange={(v) => {
-                        setSelectedGroup(v);
-                        setCurrentPage(0);
-                      }}
-                      options={groups.map((g) => ({
-                        value: g,
-                        label: g === "all" ? "全部分组" : g,
-                      }))}
-                    />
-                  </div>
-
-                  <div className="wall-toolbar__right">
-                    <div className="wall-search-box">
-                      <SearchField
-                        label="搜索设备"
-                        placeholder="搜名称或 IP…"
-                        value={searchText}
-                        onValueChange={(val) => {
-                          setSearchText(val);
-                          setCurrentPage(0);
-                        }}
-                      />
-                    </div>
-
-                    {gridMode !== "all" && totalPages > 1 && (
-                      <Pagination
-                        page={safePage + 1}
-                        pageCount={totalPages}
-                        onPageChange={(p) => setCurrentPage(p - 1)}
-                        label="监控画面分页导航"
-                      />
-                    )}
-
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      onClick={() =>
-                        void handleToggleAllAutoRecord(activeRecordingCount === 0)
-                      }
-                      title="一键开启或关闭所有摄像头的后台 1080P 自动录像"
-                    >
-                      {activeRecordingCount > 0 ? (
-                        <>
-                          <VideoOff size={14} />
-                          <span>关闭全部录像</span>
-                        </>
-                      ) : (
-                        <>
-                          <Video size={14} />
-                          <span>开启全部录像</span>
-                        </>
-                      )}
-                    </Button>
-
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      onClick={() => setAudioEnabledMap({})}
-                      title="关闭所有设备的声音监听"
-                    >
-                      <VolumeX size={14} />
-                      <span>全部静音</span>
-                    </Button>
-
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      onClick={() => setReorderModalOpen(true)}
-                      title="打开 @uiarc/reorderable-list 列表视图调整监控顺序"
-                    >
-                      <ArrowUpDown size={14} />
-                      <span>排序</span>
-                    </Button>
-                  </div>
-                </section>
-
-                {/* Camera Wall Grid */}
+                {/* Camera Wall Grid (100% Space Utilization, No Permanent Second Toolbar Row) */}
                 <section
                   className={`camera-wall-grid ${
                     gridRows > 1 ? "camera-wall-grid--fit-viewport" : ""
@@ -1196,10 +1511,7 @@ export function App() {
               });
               await fetchRecordings();
             }}
-            onOpenSettingsModal={() => {
-              setActiveTab("devices");
-              setDevicePolicyModalOpen(true);
-            }}
+            onOpenSettingsModal={() => openSystemSettings("recording")}
           />
         )}
 
@@ -1211,8 +1523,7 @@ export function App() {
             defaultSubnet={defaultSubnet}
             defaultUsername={defaultUsername}
             defaultPassword={defaultPassword}
-            policyModalOpen={devicePolicyModalOpen}
-            onPolicyModalOpenChange={setDevicePolicyModalOpen}
+            onOpenSettingsModal={() => openSystemSettings("recording")}
             onOpenReorderModal={() => setReorderModalOpen(true)}
             onScanCompleteAndAdded={async () => {
               await Promise.all([fetchCameras(), fetchRecordings()]);
@@ -1238,14 +1549,6 @@ export function App() {
               await Promise.all([fetchCameras(), fetchRecordings()]);
             }}
             onRebootCamera={handleRebootCamera}
-            onSaveSettings={async (cfg) => {
-              await fetch("/api/settings", {
-                method: "PUT",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(cfg),
-              });
-              await fetchRecordings();
-            }}
           />
         )}
       </main>
@@ -1262,16 +1565,7 @@ export function App() {
             className={`zoom-dialog-content ${
               ptzPanelOpen ? "zoom-dialog-content--with-ptz" : ""
             }`}
-            title={`${zoomCamera.name} · 1080P 高清主码流与物理云台控制`}
-            description={
-              cameraSupportsTalk(zoomCamera)
-                ? `设备 IP: ${zoomCamera.ip} · 分组: ${
-                    zoomCamera.group || "默认分组"
-                  } · 方向键/WASD 控制物理云台旋转 · 按住空格键对讲`
-                : `设备 IP: ${zoomCamera.ip} · 分组: ${
-                    zoomCamera.group || "默认分组"
-                  } · 方向键/WASD 控制物理云台旋转`
-            }
+            title={zoomCamera.name}
           >
             <div className="zoom-modal-body">
               <div
@@ -1311,7 +1605,7 @@ export function App() {
 
               <div className="zoom-intercom-bar">
                 <div className="zoom-intercom-bar__left">
-                  {cameraSupportsTalk(zoomCamera) ? (
+                  {cameraSupportsTalk(zoomCamera) && (
                     <>
                       <Button
                         variant={
@@ -1325,12 +1619,12 @@ export function App() {
                         {talkCamera?.id === zoomCamera.id && talkMode === "toggle" ? (
                           <>
                             <PhoneOff size={16} />
-                            <span>挂断持续双向通话</span>
+                            <span>挂断通话</span>
                           </>
                         ) : (
                           <>
                             <PhoneCall size={16} />
-                            <span>开启持续双向通话</span>
+                            <span>双向通话</span>
                           </>
                         )}
                       </Button>
@@ -1342,26 +1636,28 @@ export function App() {
                             ? "ptt-large-btn--active"
                             : ""
                         }`}
-                        onPointerDown={() => handleStartPTT(zoomCamera)}
-                        onPointerUp={() => handleStopPTT(zoomCamera)}
-                        onPointerLeave={() => {
-                          if (talkCamera?.id === zoomCamera.id && talkMode === "ptt") {
-                            handleStopPTT(zoomCamera);
-                          }
+                        onPointerDown={(e) => {
+                          if (e.button !== 0) return;
+                          e.currentTarget.setPointerCapture(e.pointerId);
+                          handleStartPTT(zoomCamera);
                         }}
+                        onPointerUp={(e) => {
+                          if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+                            e.currentTarget.releasePointerCapture(e.pointerId);
+                          }
+                          handleStopPTT(zoomCamera);
+                        }}
+                        onPointerCancel={() => handleStopPTT(zoomCamera)}
+                        onLostPointerCapture={() => handleStopPTT(zoomCamera)}
                       >
                         <Mic size={16} />
                         <span>
                           {talkCamera?.id === zoomCamera.id && talkMode === "ptt"
-                            ? "正在对讲中（松开结束）…"
-                            : "按住说话（或按住空格键）"}
+                            ? "对讲中…"
+                            : "按住说话"}
                         </span>
                       </button>
                     </>
-                  ) : (
-                    <Badge tone="neutral" size="sm">
-                      标准 RTSP 监控机位
-                    </Badge>
                   )}
                 </div>
 
@@ -1370,10 +1666,10 @@ export function App() {
                     variant={ptzPanelOpen ? "primary" : "secondary"}
                     size="md"
                     onClick={() => setPtzPanelOpen((v) => !v)}
-                    title="展开或收起右侧云台方向盘、预置位与电子变倍控制面板"
+                    title="展开或收起右侧云台控制面板"
                   >
                     <Compass size={16} />
-                    <span>{ptzPanelOpen ? "收起云台面板" : "展开云台控制"}</span>
+                    <span>云台控制</span>
                   </Button>
 
                   {(() => {
@@ -1388,7 +1684,7 @@ export function App() {
                         }
                       >
                         {isMan ? <Square size={15} /> : <Video size={16} />}
-                        <span>{isMan ? "停止手动录制" : "录制 1080P 视频+音频"}</span>
+                        <span>{isMan ? "停止录制" : "手动录像"}</span>
                       </Button>
                     );
                   })()}
@@ -1404,9 +1700,229 @@ export function App() {
                     }}
                   >
                     <Film size={16} />
-                    <span>查看该设备录像回放</span>
+                    <span>录像回放</span>
                   </Button>
                 </div>
+              </div>
+            </div>
+          </DialogContent>
+        )}
+      </Dialog>
+
+      {/* Quick Search & Command Palette Dialog (Cmd/Ctrl+K or /) */}
+      <Dialog open={commandModalOpen} onOpenChange={setCommandModalOpen}>
+        {commandModalOpen && (
+          <DialogContent
+            className="command-dialog-content"
+            title="快速搜索与大屏指令 (⌘K /)"
+          >
+            <div className="command-palette">
+              <div className="command-palette__search">
+                <SearchField
+                  autoFocus
+                  label="搜索监控设备"
+                  placeholder="输入名称、IP 或分组（↑↓ 选择，回车直达 1080P 放大，Shift+回车筛选大屏）…"
+                  value={commandQuery}
+                  onValueChange={(val) => {
+                    setCommandQuery(val);
+                    setCommandSelectedIndex(0);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "ArrowDown") {
+                      e.preventDefault();
+                      setCommandSelectedIndex((i) =>
+                        Math.min(
+                          Math.max(0, commandMatchedCameras.length - 1),
+                          i + 1
+                        )
+                      );
+                    } else if (e.key === "ArrowUp") {
+                      e.preventDefault();
+                      setCommandSelectedIndex((i) => Math.max(0, i - 1));
+                    } else if (e.key === "Enter") {
+                      e.preventDefault();
+                      if (e.shiftKey) {
+                        setSearchText(commandQuery);
+                        setCurrentPage(0);
+                        setActiveTab("live");
+                        setCommandModalOpen(false);
+                        return;
+                      }
+                      const targetCam = commandMatchedCameras[safeCommandIndex];
+                      if (targetCam) {
+                        setCommandModalOpen(false);
+                        setActiveTab("live");
+                        handleOpenZoom(targetCam);
+                      }
+                    }
+                  }}
+                />
+                {commandQuery.trim() !== searchText.trim() && (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => {
+                      setSearchText(commandQuery.trim());
+                      setCurrentPage(0);
+                      setActiveTab("live");
+                      setCommandModalOpen(false);
+                    }}
+                  >
+                    <span>在大屏中过滤 "{commandQuery.trim() || "全部"}"</span>
+                  </Button>
+                )}
+              </div>
+
+              <div className="command-palette__quick-bar">
+                <span className="command-palette__section-label">快捷布局与模式</span>
+                <div className="command-palette__pills">
+                  {(
+                    [
+                      { value: "all", label: "1 · 全览" },
+                      { value: "36", label: "2 · 36宫格" },
+                      { value: "40", label: "3 · 40宫格" },
+                      { value: "16", label: "4 · 16宫格" },
+                      { value: "9", label: "5 · 9宫格" },
+                    ] as const
+                  ).map((opt) => (
+                    <Button
+                      key={opt.value}
+                      variant={gridMode === opt.value ? "primary" : "secondary"}
+                      size="sm"
+                      onClick={() => {
+                        setGridMode(opt.value);
+                        setCurrentPage(0);
+                        setActiveTab("live");
+                        setCommandModalOpen(false);
+                      }}
+                    >
+                      <span>{opt.label}</span>
+                    </Button>
+                  ))}
+
+                  <Button
+                    variant={immersiveMode ? "primary" : "secondary"}
+                    size="sm"
+                    onClick={() => {
+                      setImmersiveMode((prev) => !prev);
+                      setActiveTab("live");
+                      setCommandModalOpen(false);
+                    }}
+                  >
+                    {immersiveMode ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
+                    <span>F · {immersiveMode ? "退出沉浸" : "沉浸满屏"}</span>
+                  </Button>
+                </div>
+              </div>
+
+              {groups.length > 1 && (
+                <div className="command-palette__quick-bar">
+                  <span className="command-palette__section-label">分组快速切换</span>
+                  <div className="command-palette__pills">
+                    {groups.map((g) => (
+                      <Button
+                        key={g}
+                        variant={selectedGroup === g ? "primary" : "ghost"}
+                        size="sm"
+                        onClick={() => {
+                          setSelectedGroup(g);
+                          setCurrentPage(0);
+                          setActiveTab("live");
+                          setCommandModalOpen(false);
+                        }}
+                      >
+                        <span>{g === "all" ? "全部分组" : g}</span>
+                      </Button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="command-palette__results">
+                <div className="command-palette__results-hdr">
+                  <span className="command-palette__section-label">
+                    匹配摄像头 ({commandMatchedCameras.length})
+                  </span>
+                  <span className="command-palette__hint">
+                    回车打开 1080P 高清画面 · Shift+回车过滤大屏
+                  </span>
+                </div>
+
+                <ScrollArea
+                  maxHeight="44vh"
+                  className="command-palette__scroll"
+                  label="快速搜索匹配设备列表"
+                >
+                  {commandMatchedCameras.length === 0 ? (
+                    <div className="command-palette__empty">
+                      未找到匹配的摄像头
+                    </div>
+                  ) : (
+                    <div className="command-palette__list" role="listbox">
+                      {commandMatchedCameras.map((cam, idx) => {
+                        const isOnline = Boolean(onlineMap[cam.id]);
+                        const isSelected = idx === safeCommandIndex;
+                        return (
+                          <div
+                            key={cam.id}
+                            role="option"
+                            aria-selected={isSelected}
+                            className={`command-camera-item ${
+                              isSelected ? "command-camera-item--selected" : ""
+                            }`}
+                            onMouseEnter={() => setCommandSelectedIndex(idx)}
+                            onClick={() => {
+                              setCommandModalOpen(false);
+                              setActiveTab("live");
+                              handleOpenZoom(cam);
+                            }}
+                          >
+                            <div className="command-camera-item__left">
+                              <span
+                                className={`status-dot status-dot--${
+                                  isOnline ? "live" : "connecting"
+                                }`}
+                              />
+                              <CameraIcon size={14} />
+                              <strong className="command-camera-item__name">
+                                {cam.name}
+                              </strong>
+                              <span className="command-camera-item__ip">
+                                {cam.ip}
+                              </span>
+                              {cam.group && (
+                                <Badge tone="neutral" size="sm">
+                                  {cam.group}
+                                </Badge>
+                              )}
+                            </div>
+                            <div className="command-camera-item__right">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setSearchText(cam.name);
+                                  setCurrentPage(0);
+                                  setActiveTab("live");
+                                  setCommandModalOpen(false);
+                                }}
+                              >
+                                <span>仅看此路</span>
+                              </Button>
+                              <Badge
+                                tone={isOnline ? "success" : "neutral"}
+                                size="sm"
+                              >
+                                1080P 放大 ↵
+                              </Badge>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </ScrollArea>
               </div>
             </div>
           </DialogContent>
@@ -1419,7 +1935,6 @@ export function App() {
           <DialogContent
             className="reorder-dialog-content"
             title="调整监控画面排序"
-            description="按住左侧手柄拖拽，或聚焦手柄后使用 ↑ / ↓ 方向键调整顺序，更改将实时同步到全览墙并自动保存。"
           >
             <ScrollArea
               maxHeight="68vh"
@@ -1436,166 +1951,30 @@ export function App() {
         )}
       </Dialog>
 
-      {/* @uiarc/dialog Controlled One-Click Safe Self-Update Modal */}
-      <Dialog open={updateModalOpen} onOpenChange={setUpdateModalOpen}>
-        {updateModalOpen && (
-          <DialogContent
-            className="form-dialog-content"
-            title="软件版本检查与受控安全热升级"
-            description="本系统采用受控升级机制：不会在后台静默打断监控录像，仅在您确认后先校验 SHA-256 签名、安全刷盘所有 1080P 录像分片，再原子替换主程序并自动重启。"
-          >
-            <div className="modal-form-stack">
-              <div className="update-meta-strip">
-                <Badge tone="neutral" size="sm">
-                  当前版本: {updateStatus?.current_version || "v2.0.0"}
-                </Badge>
-                {updateStatus?.os_arch && (
-                  <Badge tone="neutral" size="sm">
-                    运行平台: {updateStatus.os_arch}
-                  </Badge>
-                )}
-                {updateStatus?.has_update && updateStatus.latest_version && (
-                  <Badge tone="success" size="sm">
-                    最新可用: {updateStatus.latest_version}
-                  </Badge>
-                )}
-                {updateStatus?.last_checked_at && (
-                  <span className="text-muted-sm">
-                    上次检查: {updateStatus.last_checked_at}
-                  </span>
-                )}
-              </div>
-
-              <form
-                className="update-source-row"
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  void handleCheckUpdate();
-                }}
-              >
-                <div className="update-source-row__input">
-                  <Input
-                    label="更新源地址 (默认绑定 GitHub Releases 官方仓库，亦支持局域网共享目录)"
-                    value={updateUrlInput}
-                    onChange={(e) => setUpdateUrlInput(e.target.value)}
-                    placeholder="https://api.github.com/repos/focus0802/focus-camera/releases/latest"
-                    description="留空或使用默认地址将从 GitHub Releases (focus0802/focus-camera) 检查更新（内置国内加速镜像自动回退）"
-                  />
-                </div>
-              </form>
-
-              {updateStatus?.error && (
-                <Alert tone="danger" title="检查或执行更新时遇到问题">
-                  {updateStatus.error}
-                </Alert>
-              )}
-
-              {!updateStatus?.error &&
-                updateStatus?.state === "up_to_date" &&
-                updateStatus.message && (
-                  <Alert tone="success" title={updateStatus.message}>
-                    当前运行程序已是最新稳定版本，无需升级。
-                  </Alert>
-                )}
-
-              {!updateStatus?.error &&
-                updateStatus?.state === "idle" &&
-                updateStatus.message && (
-                  <Alert tone="info" title="配置更新源说明">
-                    {updateStatus.message}
-                  </Alert>
-                )}
-
-              {updateStatus?.has_update && (
-                <div className="update-release-card">
-                  <div className="update-release-card__head">
-                    <strong>
-                      新版本 {updateStatus.latest_version}
-                      {updateStatus.published_at ? ` (${updateStatus.published_at})` : ""}
-                    </strong>
-                    {updateStatus.expected_sha256 && (
-                      <Badge tone="info" size="sm">
-                        <ShieldCheck size={12} />
-                        <span>含 SHA-256 签名校验</span>
-                      </Badge>
-                    )}
-                  </div>
-                  {updateStatus.release_notes && (
-                    <pre className="update-release-notes">
-                      {updateStatus.release_notes}
-                    </pre>
-                  )}
-                  {activeRecordingCount > 0 && (
-                    <p className="update-safe-note">
-                      提示：当前有 {activeRecordingCount} 路 1080P 录像正在运行。点击下方「确认升级并重启」后，系统会先安全封存当前所有 MP4 录像分片，不会造成录像文件损坏。
-                    </p>
-                  )}
-                </div>
-              )}
-
-              {(updateStatus?.state === "downloading" ||
-                updateStatus?.state === "verifying" ||
-                updateStatus?.state === "applying" ||
-                updateStatus?.state === "restarting") && (
-                <div className="update-progress-box">
-                  <Progress
-                    value={updateStatus.progress_pct}
-                    max={100}
-                    label={updateStatus.message || "正在安全升级…"}
-                    showValue
-                  />
-                </div>
-              )}
-
-              <div className="manual-cam-actions">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setUpdateModalOpen(false)}
-                >
-                  关闭
-                </Button>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  loading={checkingUpdate || updateStatus?.state === "checking"}
-                  disabled={
-                    updateStatus?.state === "downloading" ||
-                    updateStatus?.state === "applying" ||
-                    updateStatus?.state === "restarting"
-                  }
-                  onClick={() => void handleCheckUpdate()}
-                >
-                  <RefreshCw size={14} />
-                  <span>检查更新</span>
-                </Button>
-                {updateStatus?.has_update && (
-                  <Button
-                    type="button"
-                    variant="primary"
-                    size="sm"
-                    loading={
-                      applyingUpdate ||
-                      updateStatus?.state === "downloading" ||
-                      updateStatus?.state === "verifying" ||
-                      updateStatus?.state === "applying" ||
-                      updateStatus?.state === "restarting"
-                    }
-                    onClick={() => void handleApplyUpdate()}
-                  >
-                    <Download size={14} />
-                    <span>
-                      确认安全升级并重启 ({updateStatus.latest_version})
-                    </span>
-                  </Button>
-                )}
-              </div>
-            </div>
-          </DialogContent>
-        )}
-      </Dialog>
+      {/* Unified System Settings Modal (@uiarc/dialog + @uiarc/tabs) */}
+      <SystemSettingsModal
+        open={settingsModalOpen}
+        onOpenChange={setSettingsModalOpen}
+        activeTab={settingsTab}
+        onTabChange={setSettingsTab}
+        recordingConfig={recordingsPayload?.config ?? DEFAULT_REC_CONFIG}
+        activeRecordingCount={activeRecordingCount}
+        onSaveRecordingSettings={async (cfg) => {
+          await fetch("/api/settings", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(cfg),
+          });
+          await fetchRecordings();
+        }}
+        updateStatus={updateStatus}
+        updateUrlInput={updateUrlInput}
+        onUpdateUrlInputChange={setUpdateUrlInput}
+        checkingUpdate={checkingUpdate}
+        applyingUpdate={applyingUpdate}
+        onCheckUpdate={handleCheckUpdate}
+        onApplyUpdate={handleApplyUpdate}
+      />
 
       {/* @uiarc/dialog Graceful Service Shutdown Confirmation Modal */}
       <Dialog open={shutdownModalOpen} onOpenChange={setShutdownModalOpen}>
@@ -1603,20 +1982,13 @@ export function App() {
           <DialogContent
             className="shutdown-dialog-content"
             title="关闭或最小化主窗口"
-            description={
-              isMacDesktop
-                ? "您可以将主窗口收起到右上角菜单栏托盘继续后台运行，或彻底关闭监控服务。"
-                : "您可以将主窗口收起到右下角系统托盘继续后台运行，或彻底关闭监控服务。"
-            }
           >
             <div className="modal-form-stack">
               {activeRecordingCount > 0 && (
                 <Alert
                   tone="warning"
-                  title={`正在后台录制 ${activeRecordingCount} 路 1080P+音频监控`}
-                >
-                  选择「最小化到系统托盘」不会中断任何录像任务，点击托盘图标即可随时恢复主窗口；若选择「彻底退出并停录」，系统将先安全封存当前录像分片再关闭服务。
-                </Alert>
+                  title={`正在后台录制 ${activeRecordingCount} 路监控`}
+                />
               )}
               <div className="manual-cam-actions manual-cam-actions--split">
                 <Button

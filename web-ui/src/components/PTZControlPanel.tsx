@@ -37,7 +37,6 @@ export function PTZControlPanel({
   const [detectedModel, setDetectedModel] = useState<string>(
     camera.model || ""
   );
-  const [protocol, setProtocol] = useState<string>("tplink");
   const [flipType, setFlipType] = useState<string>(camera.flip_type || "off");
   const [invertX, setInvertX] = useState<boolean>(
     camera.ptz_invert_x ??
@@ -49,9 +48,7 @@ export function PTZControlPanel({
   );
   const [presets, setPresets] = useState<PTZPreset[]>(camera.ptz_presets ?? []);
   const [newPresetName, setNewPresetName] = useState<string>("");
-  const [statusMsg, setStatusMsg] = useState<string>(
-    "物理云台就绪 · 点击微调角度，按住连续旋转 (支持方向键 / WASD)"
-  );
+  const [statusMsg, setStatusMsg] = useState<string>("");
   const [activeDir, setActiveDir] = useState<PTZDirection | null>(null);
   const [calibrating, setCalibrating] = useState<boolean>(false);
   const [savingPreset, setSavingPreset] = useState<boolean>(false);
@@ -89,9 +86,6 @@ export function PTZControlPanel({
         const data = await res.json();
         if (cancelled) return;
         setSupportsHardwarePTZ(Boolean(data.supports_ptz));
-        if (data.protocol) {
-          setProtocol(data.protocol);
-        }
         if (data.model) {
           setDetectedModel(data.model);
         }
@@ -107,8 +101,8 @@ export function PTZControlPanel({
         if (Array.isArray(data.presets)) {
           setPresets(data.presets);
         }
-        if (data.message) {
-          setStatusMsg(data.message);
+        if (data.error) {
+          setStatusMsg(data.error);
         }
       } catch {
         // Ignore transient probe errors
@@ -142,9 +136,6 @@ export function PTZControlPanel({
         const data = await res.json();
         if (typeof data.supports_ptz === "boolean" && data.hardware_executed) {
           setSupportsHardwarePTZ(true);
-        }
-        if (data.protocol) {
-          setProtocol(data.protocol);
         }
         if (typeof data.flip_type === "string" && data.flip_type) {
           setFlipType(data.flip_type);
@@ -414,12 +405,12 @@ export function PTZControlPanel({
   ];
 
   return (
-    <aside className="ptz-panel" aria-label="物理云台控制面板">
+    <aside className="ptz-panel" aria-label="云台控制面板">
       <div className="ptz-panel__header">
         <div className="ptz-panel__title-row">
           <div className="ptz-panel__title-left">
             <Compass size={15} className="ptz-panel__icon" />
-            <strong>物理云台控制</strong>
+            <strong>云台控制</strong>
           </div>
           <div className="ptz-panel__badges">
             <Badge tone={supportsHardwarePTZ ? "success" : "warning"} size="sm">
@@ -492,12 +483,12 @@ export function PTZControlPanel({
         </div>
 
         <div className="ptz-invert-row">
-          <span className="ptz-field-label">云台旋转速度</span>
+          <span className="ptz-field-label">旋转速度</span>
           <div className="ptz-speed-actions" role="group" aria-label="云台旋转速度">
             {[
-              { value: "1", label: "慢速 (8°)" },
-              { value: "2", label: "标准 (15°)" },
-              { value: "3", label: "快速 (24°)" },
+              { value: "1", label: "慢速" },
+              { value: "2", label: "标准" },
+              { value: "3", label: "快速" },
             ].map((opt) => (
               <button
                 key={opt.value}
@@ -516,9 +507,7 @@ export function PTZControlPanel({
         {/* Mounting Mode & Direction Inversion */}
         <div className="ptz-mount-box">
           <div className="ptz-invert-row">
-            <span className="ptz-field-label">
-              安装模式 (机内画面翻转 + 方向联动)
-            </span>
+            <span className="ptz-field-label">安装模式</span>
             <div className="ptz-invert-actions">
               <button
                 type="button"
@@ -526,9 +515,9 @@ export function PTZControlPanel({
                   flipType !== "center" ? "ptz-invert-btn--active" : ""
                 }`}
                 onClick={() => void handleFlipTypeChange("off")}
-                title="切换为正装标准模式（恢复正向画面与正向云台方向）"
+                title="切换为正装标准模式"
               >
-                <span>正装 (标准画面)</span>
+                <span>正装</span>
               </button>
               <button
                 type="button"
@@ -536,17 +525,15 @@ export function PTZControlPanel({
                   flipType === "center" ? "ptz-invert-btn--active" : ""
                 }`}
                 onClick={() => void handleFlipTypeChange("center")}
-                title="切换为倒装 180° 翻转模式（再次点击可取消倒装恢复正装）"
+                title="切换为倒装 180° 翻转模式"
               >
-                <span>
-                  {flipType === "center" ? "倒装 (已开启 · 点击取消)" : "倒装 (180°翻转)"}
-                </span>
+                <span>倒装 180°</span>
               </button>
             </div>
           </div>
 
           <div className="ptz-invert-row">
-            <span className="ptz-field-label">方向单独校准 (不翻转视频画面)</span>
+            <span className="ptz-field-label">方向校准</span>
             <div className="ptz-invert-actions">
               <button
                 type="button"
@@ -554,10 +541,10 @@ export function PTZControlPanel({
                   invertX ? "ptz-invert-btn--active" : ""
                 }`}
                 onClick={() => void handleToggleInvertX()}
-                title="仅反转左右控制方向（解决往左调画面往右，且保持当前画面不翻转）"
+                title="仅反转左右控制方向"
               >
                 <FlipHorizontal2 size={13} />
-                <span>左右反向：{invertX ? "已开启" : "正常"}</span>
+                <span>左右反向</span>
               </button>
               <button
                 type="button"
@@ -565,10 +552,10 @@ export function PTZControlPanel({
                   invertY ? "ptz-invert-btn--active" : ""
                 }`}
                 onClick={() => void handleToggleInvertY()}
-                title="仅反转上下控制方向（保持当前画面不翻转）"
+                title="仅反转上下控制方向"
               >
                 <FlipVertical2 size={13} />
-                <span>上下反向：{invertY ? "已开启" : "正常"}</span>
+                <span>上下反向</span>
               </button>
             </div>
           </div>
@@ -578,7 +565,7 @@ export function PTZControlPanel({
       {/* Presets & Calibration Section */}
       <div className="ptz-presets-section">
         <div className="ptz-section-head">
-          <span className="ptz-field-label">常看视角与预置位 ({presets.length})</span>
+          <span className="ptz-field-label">预置位 ({presets.length})</span>
           <button
             type="button"
             className="ptz-cali-link"
@@ -587,7 +574,7 @@ export function PTZControlPanel({
             title="触发物理云台步进电机自检归位"
           >
             <RotateCcw size={12} />
-            <span>{calibrating ? "校准中…" : "云台自检校准"}</span>
+            <span>{calibrating ? "校准中…" : "云台校准"}</span>
           </button>
         </div>
 
@@ -595,7 +582,7 @@ export function PTZControlPanel({
           <div className="ptz-preset-form__input">
             <Input
               label="新预置位名称"
-              placeholder="如：钢琴键盘特写…"
+              placeholder="预置位名称…"
               value={newPresetName}
               onChange={(e) => setNewPresetName(e.target.value)}
             />
@@ -612,7 +599,7 @@ export function PTZControlPanel({
           </Button>
         </form>
 
-        {presets.length > 0 ? (
+        {presets.length > 0 && (
           <div className="ptz-preset-list">
             {presets.map((p) => (
               <div key={p.id} className="ptz-preset-chip">
@@ -636,16 +623,14 @@ export function PTZControlPanel({
               </div>
             ))}
           </div>
-        ) : (
-          <p className="ptz-preset-empty">
-            将云台转动到常看位置（如琴键、鼓位、门口）后点击「存预置位」，即可一键调用转动。
-          </p>
         )}
       </div>
 
-      <p className="ptz-status-line" role="status">
-        {statusMsg}
-      </p>
+      {statusMsg && (
+        <p className="ptz-status-line" role="status">
+          {statusMsg}
+        </p>
+      )}
     </aside>
   );
 }

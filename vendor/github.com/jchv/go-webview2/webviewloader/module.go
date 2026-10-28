@@ -1,153 +1,282 @@
+//go:build windows
+
 package webviewloader
 
 import (
 	"fmt"
-	"sync"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 	"unsafe"
 
-	"github.com/jchv/go-winloader"
 	"golang.org/x/sys/windows"
 )
 
-var (
-	nativeModule                                       = windows.NewLazyDLL("WebView2Loader")
-	nativeCreate                                       = nativeModule.NewProc("CreateCoreWebView2EnvironmentWithOptions")
-	nativeCompareBrowserVersions                       = nativeModule.NewProc("CompareBrowserVersions")
-	nativeGetAvailableCoreWebView2BrowserVersionString = nativeModule.NewProc("GetAvailableCoreWebView2BrowserVersionString")
+// WebView2 release channel client GUIDs in priority order (Stable Evergreen -> Beta -> Dev -> Canary).
+var webview2ClientGUIDs = []string{
+	"{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}", // Microsoft Edge WebView2 Runtime (Stable Evergreen)
+	"{2CD8A007-E189-409D-A2C8-9AF4EF3C72AA}", // Microsoft Edge Beta
+	"{0D50BFEC-CD6A-4F9A-964C-C7416E3ACB10}", // Microsoft Edge Dev
+	"{65C35B14-6C1D-4122-AC46-7148CC9D6497}", // Microsoft Edge Canary
+}
 
-	memOnce                                         sync.Once
-	memModule                                       winloader.Module
-	memCreate                                       winloader.Proc
-	memCompareBrowserVersions                       winloader.Proc
-	memGetAvailableCoreWebView2BrowserVersionString winloader.Proc
-	memErr                                          error
-)
+func archSubfolders() []string {
+	switch runtime.GOARCH {
+	case "arm64":
+		return []string{"arm64", "x64"}
+	case "386":
+		return []string{"x86"}
+	default:
+		return []string{"x64", "arm64"}
+	}
+}
 
-// CompareBrowserVersions will compare the 2 given versions and return:
-//
-//	-1 = v1 < v2
-//	 0 = v1 == v2
-//	 1 = v1 > v2
+// CompareBrowserVersions compares two dotted version strings and returns:
+// -1 if v1 < v2, 0 if v1 == v2, 1 if v1 > v2.
 func CompareBrowserVersions(v1 string, v2 string) (int, error) {
-
-	_v1, err := windows.UTF16PtrFromString(v1)
-	if err != nil {
-		return 0, err
+	p1 := parseVersionParts(v1)
+	p2 := parseVersionParts(v2)
+	if len(p1) == 0 || len(p2) == 0 {
+		return 0, fmt.Errorf("invalid version string: %q vs %q", v1, v2)
 	}
-	_v2, err := windows.UTF16PtrFromString(v2)
-	if err != nil {
-		return 0, err
+	maxLen := len(p1)
+	if len(p2) > maxLen {
+		maxLen = len(p2)
 	}
-
-	nativeErr := nativeModule.Load()
-	if nativeErr == nil {
-		nativeErr = nativeCompareBrowserVersions.Find()
-	}
-	var result int
-	if nativeErr != nil {
-		err = loadFromMemory(nativeErr)
-		if err != nil {
-			return 0, fmt.Errorf("Unable to load WebView2Loader.dll from disk: %v -- or from memory: %w", nativeErr, memErr)
+	for i := 0; i < maxLen; i++ {
+		var a, b int
+		if i < len(p1) {
+			a = p1[i]
 		}
-		_, _, err = memCompareBrowserVersions.Call(
-			uint64(uintptr(unsafe.Pointer(_v1))),
-			uint64(uintptr(unsafe.Pointer(_v2))),
-			uint64(uintptr(unsafe.Pointer(&result))))
-	} else {
-		_, _, err = nativeCompareBrowserVersions.Call(
-			uintptr(unsafe.Pointer(_v1)),
-			uintptr(unsafe.Pointer(_v2)),
-			uintptr(unsafe.Pointer(&result)))
+		if i < len(p2) {
+			b = p2[i]
+		}
+		if a < b {
+			return -1, nil
+		}
+		if a > b {
+			return 1, nil
+		}
 	}
-	if err != windows.ERROR_SUCCESS {
-		return result, err
-	}
-	return result, nil
+	return 0, nil
 }
 
-// GetInstalledVersion returns the installed version of the webview2 runtime.
-// If there is no version installed, a blank string is returned.
+func parseVersionParts(v string) []int {
+	s := strings.TrimSpace(v)
+	if s == "" {
+		return nil
+	}
+	fields := strings.Fields(s)
+	if len(fields) > 0 {
+		s = fields[0]
+	}
+	parts := strings.Split(s, ".")
+	out := make([]int, 0, len(parts))
+	for _, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil {
+			return nil
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// GetInstalledVersion returns the installed version of the Microsoft Edge WebView2 runtime.
+// If no runtime is installed, an empty string is returned.
 func GetInstalledVersion() (string, error) {
-	// GetAvailableCoreWebView2BrowserVersionString is documented as:
-	//	public STDAPI GetAvailableCoreWebView2BrowserVersionString(PCWSTR browserExecutableFolder, LPWSTR * versionInfo)
-	// where winnt.h defines STDAPI as:
-	//	EXTERN_C HRESULT STDAPICALLTYPE
-	// the first part (EXTERN_C) can be ignored since it's only relevent to C++,
-	// HRESULT is return type which means it returns an integer that will be 0 (S_OK) on success,
-	// and finally STDAPICALLTYPE tells us the function uses the stdcall calling convention (what Go assumes for syscalls).
-
-	nativeErr := nativeModule.Load()
-	if nativeErr == nil {
-		nativeErr = nativeGetAvailableCoreWebView2BrowserVersionString.Find()
+	_, ver, err := findEmbeddedBrowserWebView("")
+	if err != nil {
+		return "", err
 	}
-	var hr uintptr
-	var result *uint16
-	if nativeErr != nil {
-		if err := loadFromMemory(nativeErr); err != nil {
-			return "", fmt.Errorf("Unable to load WebView2Loader.dll from disk: %v -- or from memory: %w", nativeErr, memErr)
-		}
-		hr64, _, _ := memGetAvailableCoreWebView2BrowserVersionString.Call(
-			uint64(uintptr(unsafe.Pointer(nil))),
-			uint64(uintptr(unsafe.Pointer(&result))))
-		hr = uintptr(hr64) // The return size of the HRESULT will be whatver native size is (i.e uintptr) and not 64-bits on 32-bit systems.  In both cases it should be interpreted as 32-bits (a LONG).
-	} else {
-		hr, _, _ = nativeGetAvailableCoreWebView2BrowserVersionString.Call(
-			uintptr(unsafe.Pointer(nil)),
-			uintptr(unsafe.Pointer(&result)))
-	}
-	defer windows.CoTaskMemFree(unsafe.Pointer(result)) // Safe even if result is nil
-	if hr != uintptr(windows.S_OK) {
-		if hr&0xFFFF == uintptr(windows.ERROR_FILE_NOT_FOUND) {
-			// The lower 16-bits (the error code itself) of the HRESULT is ERROR_FILE_NOT_FOUND which means the system isn't installed.
-			return "", nil // Return a blank string but no error since we successfully detected no install.
-		}
-		return "", fmt.Errorf("GetAvailableCoreWebView2BrowserVersionString returned HRESULT 0x%X", hr)
-	}
-	version := windows.UTF16PtrToString(result) // Safe even if result is nil
-	return version, nil
+	return ver, nil
 }
 
-// CreateCoreWebView2EnvironmentWithOptions tries to load WebviewLoader2 and
-// call the CreateCoreWebView2EnvironmentWithOptions routine.
+// CreateCoreWebView2EnvironmentWithOptions locates the system-installed Microsoft Edge WebView2
+// Runtime (EmbeddedBrowserWebView.dll) and invokes CreateWebViewEnvironmentWithOptionsInternal
+// directly via standard Windows LoadLibraryW without any in-memory reflective loader or embedded DLL.
 func CreateCoreWebView2EnvironmentWithOptions(browserExecutableFolder, userDataFolder *uint16, environmentOptions uintptr, environmentCompletedHandle uintptr) (uintptr, error) {
-	nativeErr := nativeModule.Load()
-	if nativeErr == nil {
-		nativeErr = nativeCreate.Find()
-	}
-	if nativeErr != nil {
-		err := loadFromMemory(nativeErr)
-		if err != nil {
-			return 0, err
+	customDir := ""
+	runtimeType := uintptr(0)
+	if browserExecutableFolder != nil {
+		customDir = windows.UTF16PtrToString(browserExecutableFolder)
+		if customDir != "" {
+			runtimeType = 1
 		}
-		res, _, _ := memCreate.Call(
-			uint64(uintptr(unsafe.Pointer(browserExecutableFolder))),
-			uint64(uintptr(unsafe.Pointer(userDataFolder))),
-			uint64(environmentOptions),
-			uint64(environmentCompletedHandle),
-		)
-		return uintptr(res), nil
 	}
-	res, _, _ := nativeCreate.Call(
-		uintptr(unsafe.Pointer(browserExecutableFolder)),
+	if customDir == "" {
+		if envDir := strings.TrimSpace(os.Getenv("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER")); envDir != "" {
+			customDir = envDir
+			runtimeType = 1
+		}
+	}
+
+	dllPath, _, err := findEmbeddedBrowserWebView(customDir)
+	if err != nil || dllPath == "" {
+		if err == nil {
+			err = fmt.Errorf("WebView2 runtime (EmbeddedBrowserWebView.dll) not found")
+		}
+		return uintptr(windows.ERROR_FILE_NOT_FOUND), err
+	}
+
+	dll := windows.NewLazyDLL(dllPath)
+	if err := dll.Load(); err != nil {
+		return uintptr(windows.ERROR_FILE_NOT_FOUND), fmt.Errorf("failed to load %s: %w", dllPath, err)
+	}
+	proc := dll.NewProc("CreateWebViewEnvironmentWithOptionsInternal")
+	if err := proc.Find(); err != nil {
+		return uintptr(windows.ERROR_PROC_NOT_FOUND), fmt.Errorf("missing CreateWebViewEnvironmentWithOptionsInternal in %s: %w", dllPath, err)
+	}
+
+	hr, _, _ := proc.Call(
+		1, // checkRunningInstance = true
+		runtimeType,
 		uintptr(unsafe.Pointer(userDataFolder)),
 		environmentOptions,
 		environmentCompletedHandle,
 	)
-	return res, nil
+	return hr, nil
 }
 
-func loadFromMemory(nativeErr error) error {
-	var err error
-	// DLL is not available natively. Try loading embedded copy.
-	memOnce.Do(func() {
-		memModule, memErr = winloader.LoadFromMemory(WebView2Loader)
-		if memErr != nil {
-			err = fmt.Errorf("Unable to load WebView2Loader.dll from disk: %v -- or from memory: %w", nativeErr, memErr)
-			return
+func resolveDLLInBaseDir(baseDir string) string {
+	for _, arch := range archSubfolders() {
+		candidate := filepath.Join(baseDir, "EBWebView", arch, "EmbeddedBrowserWebView.dll")
+		if fileExists(candidate) {
+			return candidate
 		}
-		memCreate = memModule.Proc("CreateCoreWebView2EnvironmentWithOptions")
-		memCompareBrowserVersions = memModule.Proc("CompareBrowserVersions")
-		memGetAvailableCoreWebView2BrowserVersionString = memModule.Proc("GetAvailableCoreWebView2BrowserVersionString")
-	})
-	return err
+	}
+	directCandidate := filepath.Join(baseDir, "EmbeddedBrowserWebView.dll")
+	if fileExists(directCandidate) {
+		return directCandidate
+	}
+	return ""
+}
+
+func findEmbeddedBrowserWebView(customDir string) (dllPath string, version string, err error) {
+	if customDir != "" {
+		if found := resolveDLLInBaseDir(customDir); found != "" {
+			return found, filepath.Base(customDir), nil
+		}
+		return "", "", fmt.Errorf("EmbeddedBrowserWebView.dll not found under %s", customDir)
+	}
+
+	// 1. Query official EdgeUpdate ClientState registry keys (HKLM WOW6432Node, HKLM, HKCU)
+	type regRoot struct {
+		root   windows.Handle
+		prefix string
+	}
+	roots := []regRoot{
+		{windows.HKEY_LOCAL_MACHINE, `SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\ClientState\`},
+		{windows.HKEY_LOCAL_MACHINE, `SOFTWARE\Microsoft\EdgeUpdate\ClientState\`},
+		{windows.HKEY_CURRENT_USER, `Software\Microsoft\EdgeUpdate\ClientState\`},
+	}
+
+	for _, guid := range webview2ClientGUIDs {
+		for _, r := range roots {
+			ebDir, pv := queryClientStateRegistry(r.root, r.prefix+guid)
+			if ebDir == "" || pv == "" || pv == "0.0.0.0" {
+				continue
+			}
+			if found := resolveDLLInBaseDir(ebDir); found != "" {
+				return found, pv, nil
+			}
+		}
+	}
+
+	// 2. Fallback: scan standard Microsoft EdgeWebView & EdgeCore Application directories on disk
+	appDirs := []string{
+		filepath.Join(os.Getenv("ProgramFiles(x86)"), "Microsoft", "EdgeWebView", "Application"),
+		filepath.Join(os.Getenv("ProgramFiles"), "Microsoft", "EdgeWebView", "Application"),
+		filepath.Join(os.Getenv("ProgramFiles(x86)"), "Microsoft", "EdgeCore"),
+		filepath.Join(os.Getenv("ProgramFiles"), "Microsoft", "EdgeCore"),
+		filepath.Join(os.Getenv("ProgramFiles(x86)"), "Microsoft", "Edge", "Application"),
+		filepath.Join(os.Getenv("ProgramFiles"), "Microsoft", "Edge", "Application"),
+		filepath.Join(os.Getenv("LOCALAPPDATA"), "Microsoft", "EdgeWebView", "Application"),
+		filepath.Join(os.Getenv("LOCALAPPDATA"), "Microsoft", "Edge", "Application"),
+	}
+	bestVer := ""
+	bestDLL := ""
+	for _, base := range appDirs {
+		if base == "" {
+			continue
+		}
+		entries, readErr := os.ReadDir(base)
+		if readErr != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			vName := entry.Name()
+			if len(parseVersionParts(vName)) < 2 {
+				continue
+			}
+			found := resolveDLLInBaseDir(filepath.Join(base, vName))
+			if found == "" {
+				continue
+			}
+			if bestVer == "" {
+				bestVer = vName
+				bestDLL = found
+			} else if cmp, cmpErr := CompareBrowserVersions(vName, bestVer); cmpErr == nil && cmp > 0 {
+				bestVer = vName
+				bestDLL = found
+			}
+		}
+	}
+	if bestDLL != "" {
+		return bestDLL, bestVer, nil
+	}
+
+	return "", "", nil
+}
+
+func queryClientStateRegistry(root windows.Handle, subkey string) (ebWebView string, pv string) {
+	subkeyPtr, err := windows.UTF16PtrFromString(subkey)
+	if err != nil {
+		return "", ""
+	}
+	accessFlags := []uint32{
+		windows.KEY_READ,
+		windows.KEY_READ | 0x0200, // KEY_WOW64_32KEY
+		windows.KEY_READ | 0x0100, // KEY_WOW64_64KEY
+	}
+	for _, access := range accessFlags {
+		var hKey windows.Handle
+		if err := windows.RegOpenKeyEx(root, subkeyPtr, 0, access, &hKey); err != nil {
+			continue
+		}
+		ebWebView = readRegistryString(hKey, "EBWebView")
+		pv = readRegistryString(hKey, "pv")
+		_ = windows.RegCloseKey(hKey)
+		if ebWebView != "" && pv != "" {
+			return ebWebView, pv
+		}
+	}
+	return "", ""
+}
+
+func readRegistryString(hKey windows.Handle, valueName string) string {
+	namePtr, err := windows.UTF16PtrFromString(valueName)
+	if err != nil {
+		return ""
+	}
+	var valType uint32
+	var bufLen uint32
+	if err := windows.RegQueryValueEx(hKey, namePtr, nil, &valType, nil, &bufLen); err != nil || bufLen == 0 {
+		return ""
+	}
+	buf := make([]uint16, bufLen/2+1)
+	if err := windows.RegQueryValueEx(hKey, namePtr, nil, &valType, (*byte)(unsafe.Pointer(&buf[0])), &bufLen); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(windows.UTF16ToString(buf))
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }

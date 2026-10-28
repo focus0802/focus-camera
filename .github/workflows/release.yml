@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release tag version (e.g. v2.2.0)"
+        description: "Release tag version (e.g. v2.3.0)"
         required: true
-        default: "v2.2.0"
+        default: "v2.3.0"
 
 permissions:
   contents: write
@@ -66,9 +66,10 @@ jobs:
           CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -mod=vendor -ldflags "${LDFLAGS}" -o dist/FocusCamera-Mac .
           codesign --force --sign - dist/FocusCamera-Mac
 
-          # 2. Build Windows x64 GUI & Console Binaries
-          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -mod=vendor -ldflags "${LDFLAGS} -H=windowsgui" -o dist/FocusCamera-Windows-x64.exe .
-          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -mod=vendor -ldflags "${LDFLAGS}" -o dist/FocusCamera-Windows-Console.exe .
+          # 2. Build Windows x64 GUI & Console Binaries (keep symbols on Windows to avoid Defender ML false positives)
+          WIN_LDFLAGS="-X focus-camera/internal/updater.CurrentVersion=${RELEASE_VERSION}"
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -mod=vendor -ldflags "${WIN_LDFLAGS} -H=windowsgui" -o dist/FocusCamera-Windows-x64.exe .
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -mod=vendor -ldflags "${WIN_LDFLAGS}" -o dist/FocusCamera-Windows-Console.exe .
 
           # 3. Compute SHA-256 & File Sizes and Generate version.json
           MAC_SHA=$(shasum -a 256 dist/FocusCamera-Mac | awk '{print $1}')
@@ -81,7 +82,7 @@ jobs:
           {
             "version": "${RELEASE_VERSION}",
             "published_at": "${PUB_DATE}",
-            "notes": "FocusCamera ${RELEASE_VERSION} 沉浸式桌面顶栏、系统托盘静默录制与全能云台升级版：\n1. 双端沉浸式一体化顶栏：macOS（左上原生红绿灯）与 Windows（右上自定义最小化/最大化/关闭按钮）视觉统一，支持拖拽移动、双击最大化与深浅主题联动\n2. 系统托盘后台静默常驻：关闭主窗口时弹出 @uiarc/dialog 确认框，支持最小化至 Windows 右下角系统托盘 / macOS 右上角菜单栏托盘，后台 1080P 录像不中断\n3. 高屏占比一屏监控墙：监控卡片升级为画面底部渐变浮层 HUD，全览模式自适应视口网格高度，26+ 路画面一屏完整显示无滚动条\n4. 全平台专属高清图标：内置 macOS AppIcon.icns 与 Windows PE rsrc_windows_amd64.syso 多图层图标资源\n5. 物理云台控制、多品牌 ONVIF 扫描与机身静态 IP 直接修改，并修复带元数据轨摄像头的电流杂音问题",
+            "notes": "FocusCamera ${RELEASE_VERSION} 系统设置中心、开机静默自启与全平台满铺高清图标升级版：\n1. 全新系统设置中心：统一管理双平台开机自启（支持后台托盘静默录制）、录像存储路径原生文件夹选择、分片时长/循环覆盖策略与每日定时录制计划\n2. 全平台图标尺寸与视觉升级：Windows (.exe / 托盘) 与浏览器图标升级为 95.2% 满铺画布，软件顶栏品牌 Logo 放大至 28×28 px，macOS Dock 与顶部状态栏图标放大核心蓝宝石镜头并增强高光边缘\n3. Windows 纯原生 COM 加载器：移除内存 DLL 注入加载器，全面消除 Windows Defender 启发式误报\n4. 监控墙交互与细节打磨：优化顶栏紧凑单行布局、弹窗滚动与日期/时间选择器视觉一致性",
             "assets": {
               "darwin_arm64": {
                 "url": "FocusCamera-Mac",

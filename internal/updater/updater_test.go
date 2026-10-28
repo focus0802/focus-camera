@@ -35,7 +35,7 @@ func TestCompareVersions(t *testing.T) {
 
 func TestParseGitHubManifest(t *testing.T) {
 	ghJSON := `{
-		"tag_name": "v2.2.0",
+		"tag_name": "v2.3.0",
 		"published_at": "2026-10-25T12:00:00Z",
 		"body": "支持一键受控热更新与 SHA-256 校验",
 		"assets": [
@@ -47,8 +47,8 @@ func TestParseGitHubManifest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseManifestBytes failed: %v", err)
 	}
-	if mf.Version != "v2.2.0" {
-		t.Fatalf("expected version v2.2.0, got %s", mf.Version)
+	if mf.Version != "v2.3.0" {
+		t.Fatalf("expected version v2.3.0, got %s", mf.Version)
 	}
 	if _, ok := matchPlatformAsset(mf.Assets, "windows", "amd64"); !ok {
 		t.Fatalf("expected windows_amd64 asset match")

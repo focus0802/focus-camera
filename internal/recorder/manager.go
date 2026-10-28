@@ -70,6 +70,99 @@ type StorageSummary struct {
 	AvailableDates []string `json:"available_dates"`
 }
 
+type DiskSpaceInfo struct {
+	Path               string  `json:"path"`
+	FreeBytes          uint64  `json:"free_bytes"`
+	TotalBytes         uint64  `json:"total_bytes"`
+	UsedByRecBytes     int64   `json:"used_by_rec_bytes"`
+	FreeGB             float64 `json:"free_gb"`
+	TotalGB            float64 `json:"total_gb"`
+	UsedByRecGB        float64 `json:"used_by_rec_gb"`
+	MaxQuotaGB         int     `json:"max_quota_gb"`
+	RecommendedQuotaGB int     `json:"recommended_quota_gb"`
+}
+
+func InspectDiskSpace(rawDir string) DiskSpaceInfo {
+	targetDir := strings.TrimSpace(rawDir)
+	if targetDir == "" {
+		targetDir = "./recordings"
+	}
+	if !strings.HasPrefix(targetDir, `\\`) {
+		if abs, err := filepath.Abs(targetDir); err == nil {
+			targetDir = abs
+		}
+	}
+
+	var usedRecBytes int64
+	if entries, err := os.ReadDir(targetDir); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() || len(e.Name()) != 10 {
+				continue
+			}
+			_ = filepath.WalkDir(filepath.Join(targetDir, e.Name()), func(_ string, d os.DirEntry, err error) error {
+				if err == nil && !d.IsDir() && strings.HasSuffix(strings.ToLower(d.Name()), ".mp4") {
+					if info, err := d.Info(); err == nil {
+						usedRecBytes += info.Size()
+					}
+				}
+				return nil
+			})
+		}
+	}
+
+	probePath := targetDir
+	for i := 0; i < 16; i++ {
+		if _, err := os.Stat(probePath); err == nil {
+			break
+		}
+		parent := filepath.Dir(probePath)
+		if parent == probePath || parent == "" {
+			break
+		}
+		probePath = parent
+	}
+
+	const gb = 1024 * 1024 * 1024
+	freeBytes, totalBytes, err := getDiskSpaceBytes(probePath)
+	if err != nil || totalBytes == 0 {
+		return DiskSpaceInfo{
+			Path:               targetDir,
+			UsedByRecBytes:     usedRecBytes,
+			UsedByRecGB:        float64(usedRecBytes) / float64(gb),
+			MaxQuotaGB:         500,
+			RecommendedQuotaGB: 200,
+		}
+	}
+
+	maxQuotaGB := int(freeBytes / gb)
+	if maxQuotaGB < 1 {
+		maxQuotaGB = 1
+	}
+
+	recQuotaGB := int(float64(maxQuotaGB) * 0.85)
+	if recQuotaGB > 20 {
+		recQuotaGB = (recQuotaGB / 5) * 5
+	}
+	if recQuotaGB < 1 {
+		recQuotaGB = 1
+	}
+	if recQuotaGB >= maxQuotaGB && maxQuotaGB > 1 {
+		recQuotaGB = maxQuotaGB - 1
+	}
+
+	return DiskSpaceInfo{
+		Path:               targetDir,
+		FreeBytes:          freeBytes,
+		TotalBytes:         totalBytes,
+		UsedByRecBytes:     usedRecBytes,
+		FreeGB:             float64(freeBytes) / float64(gb),
+		TotalGB:            float64(totalBytes) / float64(gb),
+		UsedByRecGB:        float64(usedRecBytes) / float64(gb),
+		MaxQuotaGB:         maxQuotaGB,
+		RecommendedQuotaGB: recQuotaGB,
+	}
+}
+
 type activeWorker struct {
 	camID     string
 	camName   string
@@ -756,7 +849,6 @@ func (m *Manager) runRetentionCleanup() {
 	if err != nil {
 		return
 	}
-	cutoffDate := time.Now().AddDate(0, 0, -rc.RetentionDays).Format("2006-01-02")
 
 	activeAbs := make(map[string]bool)
 	m.mu.Lock()
@@ -781,11 +873,6 @@ func (m *Manager) runRetentionCleanup() {
 
 	for _, e := range entries {
 		if !e.IsDir() || len(e.Name()) != 10 {
-			continue
-		}
-		if e.Name() < cutoffDate {
-			_ = os.RemoveAll(filepath.Join(storageDir, e.Name()))
-			log.Printf("[存储巡检] 已自动清理超过 %d 天保留期的历史录像目录: %s", rc.RetentionDays, e.Name())
 			continue
 		}
 		dateDir := filepath.Join(storageDir, e.Name())
@@ -818,6 +905,7 @@ func (m *Manager) runRetentionCleanup() {
 		})
 		var freedBytes int64
 		var removedCount int
+		affectedDirs := make(map[string]bool)
 		for _, f := range allFiles {
 			overQuota := maxBytes > 0 && totalBytes > maxBytes
 			lowDisk := needFreeCleanup && (freeBytes+uint64(freedBytes) < minFreeDiskBytes)
@@ -828,10 +916,24 @@ func (m *Manager) runRetentionCleanup() {
 				totalBytes -= f.size
 				freedBytes += f.size
 				removedCount++
+				affectedDirs[filepath.Dir(f.path)] = true
+			}
+		}
+		// Prune empty camera and date directories left behind after FIFO cyclic deletion
+		dateDirsToCheck := make(map[string]bool)
+		for camDir := range affectedDirs {
+			if sub, err := os.ReadDir(camDir); err == nil && len(sub) == 0 {
+				_ = os.Remove(camDir)
+			}
+			dateDirsToCheck[filepath.Dir(camDir)] = true
+		}
+		for dateDir := range dateDirsToCheck {
+			if sub, err := os.ReadDir(dateDir); err == nil && len(sub) == 0 {
+				_ = os.Remove(dateDir)
 			}
 		}
 		if removedCount > 0 {
-			log.Printf("[存储巡检] 已自动淘汰 %d 个最旧录像分片，释放空间 %.1f MB", removedCount, float64(freedBytes)/(1024*1024))
+			log.Printf("[存储巡检] 满额自动循环覆盖：已淘汰 %d 个最早录像分片，释放空间 %.1f MB", removedCount, float64(freedBytes)/(1024*1024))
 		}
 	}
 }

@@ -29,8 +29,8 @@ CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 /opt/homebrew/bin/go build -mod=vendor -l
 cp dist/FocusCamera-Mac dist/FocusCamera.app/Contents/MacOS/FocusCamera
 /usr/bin/codesign --force --deep --sign - dist/FocusCamera.app
 
-CGO_ENABLED=0 GOOS=windows GOARCH=amd64 /opt/homebrew/bin/go build -mod=vendor -ldflags="-s -w -H=windowsgui -X focus-camera/internal/updater.CurrentVersion=v2.0.1" -o dist/FocusCamera-Windows-x64.exe .
-CGO_ENABLED=0 GOOS=windows GOARCH=amd64 /opt/homebrew/bin/go build -mod=vendor -ldflags="-s -w -X focus-camera/internal/updater.CurrentVersion=v2.0.1" -o dist/FocusCamera-Windows-Console.exe .
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 /opt/homebrew/bin/go build -mod=vendor -ldflags="-H=windowsgui -X focus-camera/internal/updater.CurrentVersion=v2.0.1" -o dist/FocusCamera-Windows-x64.exe .
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 /opt/homebrew/bin/go build -mod=vendor -ldflags="-X focus-camera/internal/updater.CurrentVersion=v2.0.1" -o dist/FocusCamera-Windows-Console.exe .
 ```
 
 ## 4. Generate `dist/version.json` with SHA-256 Checksums

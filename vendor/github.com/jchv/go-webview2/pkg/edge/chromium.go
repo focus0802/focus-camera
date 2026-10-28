@@ -181,7 +181,18 @@ func (e *Chromium) EnvironmentCompleted(res uintptr, env *ICoreWebView2Environme
 		_, _, _ = w32.User32PostMessageW.Call(e.hwnd, 0, 0, 0)
 		return 0
 	}
-	_, _, _ = env.vtbl.AddRef.Call(uintptr(unsafe.Pointer(env)))
+	var queriedEnv *ICoreWebView2Environment
+	iidEnv := NewGUID("{b96d755e-0319-4e92-a296-23436f46a1fc}")
+	_, _, _ = env.vtbl.QueryInterface.Call(
+		uintptr(unsafe.Pointer(env)),
+		uintptr(unsafe.Pointer(iidEnv)),
+		uintptr(unsafe.Pointer(&queriedEnv)),
+	)
+	if queriedEnv != nil {
+		env = queriedEnv
+	} else {
+		_, _, _ = env.vtbl.AddRef.Call(uintptr(unsafe.Pointer(env)))
+	}
 	e.environment = env
 
 	hr, _, _ := env.vtbl.CreateCoreWebView2Controller.Call(
@@ -204,7 +215,18 @@ func (e *Chromium) CreateCoreWebView2ControllerCompleted(res uintptr, controller
 		_, _, _ = w32.User32PostMessageW.Call(e.hwnd, 0, 0, 0)
 		return 0
 	}
-	_, _, _ = controller.vtbl.AddRef.Call(uintptr(unsafe.Pointer(controller)))
+	var queriedController *ICoreWebView2Controller
+	iidCtrl := NewGUID("{4d00c0d1-9434-4eb6-8078-8697a560334f}")
+	_, _, _ = controller.vtbl.QueryInterface.Call(
+		uintptr(unsafe.Pointer(controller)),
+		uintptr(unsafe.Pointer(iidCtrl)),
+		uintptr(unsafe.Pointer(&queriedController)),
+	)
+	if queriedController != nil {
+		controller = queriedController
+	} else {
+		_, _, _ = controller.vtbl.AddRef.Call(uintptr(unsafe.Pointer(controller)))
+	}
 	e.controller = controller
 
 	var token _EventRegistrationToken

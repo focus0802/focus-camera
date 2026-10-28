@@ -446,6 +446,7 @@ export function PlaybackView({
             <div className="morph-select-inline">
               <MorphSelect
                 label="机位"
+                hideLabel
                 className="morph-select--compact"
                 items={cameraSelectItems}
                 value={selectedCameraId || "all"}
@@ -514,9 +515,7 @@ export function PlaybackView({
                 className="playback-stat-chip"
                 title={`已归档 ${payload?.segment_count ?? 0} 段 · 本地目录: ${
                   payload?.config.storage_dir || "./recordings"
-                } (单段 ${payload?.config.segment_minutes ?? 15} 分钟 · 保留 ${
-                  payload?.config.retention_days ?? 7
-                } 天)`}
+                } (单段 ${payload?.config.segment_minutes ?? 15} 分钟 · 满额自动循环覆盖)`}
               >
                 <HardDrive size={13} className="playback-kpi-pill__icon" />
                 <strong>
@@ -579,11 +578,10 @@ export function PlaybackView({
         <div className="panel-card">
           <EmptyState
             icon={<Video width={24} height={24} strokeWidth={1.6} />}
-            title="当前筛选条件下暂无录像分片"
-            description="您可以在「实时监控」页面点击任意画面下方的「录像」按钮立即录制，或者开启「全部自动录像」由后台按固定时长自动归档 1080P 高清带音频 MP4。"
+            title="暂无录像分片"
             action={
               <Button variant="primary" size="md" onClick={handleRefresh}>
-                重新扫描本地录像库
+                刷新录像列表
               </Button>
             }
           />
@@ -597,18 +595,14 @@ export function PlaybackView({
                 <h3>
                   {activeSegment
                     ? `${activeSegment.camera_name} · ${activeSegment.date} ${activeSegment.start_time} - ${activeSegment.end_time}`
-                    : "选择右侧或时间轴上的录像分片开始回放"}
+                    : "未选择录像分片"}
                 </h3>
-                <p>
-                  {activeSegment
-                    ? `1080P H.264/H.265 + 8000Hz 音频 · 时长 ${formatDuration(
-                        activeSegment.duration_sec
-                      )} · 大小 ${formatBytes(activeSegment.size_bytes)}`
-                    : "支持 0.5x ~ 8x 倍速回放与一键导出 MP4"}
-                </p>
               </div>
               {activeSegment && (
                 <div className="player-card__badges">
+                  <Badge tone="neutral" size="sm">
+                    {formatDuration(activeSegment.duration_sec)} · {formatBytes(activeSegment.size_bytes)}
+                  </Badge>
                   {activeSegment.active && (
                     <Badge tone="warning" size="sm">
                       实时写入中
@@ -643,7 +637,7 @@ export function PlaybackView({
                 <div className="timeline-header__title">
                   <Film size={13} />
                   <span className="timeline-title-text">
-                    时间轴 · {timelineCameraName} · {timelineDate || "今日"} (
+                    {timelineCameraName} · {timelineDate || "今日"} (
                     {timelineSegments.length} 段)
                   </span>
                 </div>
@@ -757,7 +751,6 @@ export function PlaybackView({
               </div>
 
               <div className="speed-control">
-                <span className="field-caption">倍速</span>
                 <SegmentedControl
                   label="回放倍速"
                   value={playbackRate}
@@ -799,7 +792,6 @@ export function PlaybackView({
                     : ""}
                   )
                 </h3>
-                <span>点击行直接播放 · 点击表头全局排序</span>
               </div>
 
               <div className="wall-search-box">
@@ -807,7 +799,7 @@ export function PlaybackView({
                   label="搜索录像分片"
                   value={keyword}
                   onValueChange={setKeyword}
-                  placeholder="搜设备名称或时间 (如 前台 / 10:22)…"
+                  placeholder="搜索设备或时间…"
                 />
               </div>
             </div>
@@ -875,8 +867,8 @@ export function PlaybackView({
       >
         {pendingDeleteSeg && (
           <DialogContent
-            title="永久删除 1080P 录像分片"
-            description={`确定要永久删除「${pendingDeleteSeg.camera_name}」在 ${pendingDeleteSeg.date} (${pendingDeleteSeg.start_time} - ${pendingDeleteSeg.end_time} · ${formatBytes(pendingDeleteSeg.size_bytes)}) 的本地 MP4 录像文件吗？此操作不可撤销。`}
+            title="删除录像分片"
+            description={`确定删除「${pendingDeleteSeg.camera_name}」(${pendingDeleteSeg.date} ${pendingDeleteSeg.start_time} - ${pendingDeleteSeg.end_time}) 吗？`}
           >
             <div className="manual-cam-actions">
               <Button

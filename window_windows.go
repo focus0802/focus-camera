@@ -7,6 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
 	"unsafe"
 
 	"github.com/jchv/go-webview2"
@@ -19,12 +22,156 @@ var (
 	procDwmSetWindowAttr             = dwmapi.NewProc("DwmSetWindowAttribute")
 	procDwmExtendFrameIntoClientArea = dwmapi.NewProc("DwmExtendFrameIntoClientArea")
 
-	user32             = windows.NewLazySystemDLL("user32.dll")
-	procShowWindow     = user32.NewProc("ShowWindow")
-	procIsZoomed       = user32.NewProc("IsZoomed")
-	procPostMessageW   = user32.NewProc("PostMessageW")
-	procReleaseCapture = user32.NewProc("ReleaseCapture")
+	user32               = windows.NewLazySystemDLL("user32.dll")
+	procShowWindow       = user32.NewProc("ShowWindow")
+	procSendMessageW     = user32.NewProc("SendMessageW")
+	procGetDpiForSystem  = user32.NewProc("GetDpiForSystem")
+	procGetSystemMetrics = user32.NewProc("GetSystemMetrics")
+
+	shell32                 = windows.NewLazySystemDLL("shell32.dll")
+	procSHBrowseForFolderW  = shell32.NewProc("SHBrowseForFolderW")
+	procSHGetPathFromIDList = shell32.NewProc("SHGetPathFromIDListW")
+
+	ole32                = windows.NewLazySystemDLL("ole32.dll")
+	procCoInitializeEx   = ole32.NewProc("CoInitializeEx")
+	procCoTaskMemFree    = ole32.NewProc("CoTaskMemFree")
+
+	winWindowMu    sync.Mutex
+	activeWebView  webview2.WebView
+	activeMainHWND uintptr
 )
+
+type browseInfoW struct {
+	HwndOwner      uintptr
+	PidlRoot       uintptr
+	PszDisplayName *uint16
+	LpszTitle      *uint16
+	UlFlags        uint32
+	_              uint32
+	Lpfn           uintptr
+	LParam         uintptr
+	IImage         int32
+	_              int32
+}
+
+var browseFolderCallback = windows.NewCallback(func(hwnd uintptr, uMsg uint32, lParam, lpData uintptr) uintptr {
+	if uMsg == 1 /* BFFM_INITIALIZED */ && lpData != 0 {
+		// BFFM_SETSELECTIONW = WM_USER (0x0400) + 103 = 1127
+		_, _, _ = procSendMessageW.Call(hwnd, 1127, 1, lpData)
+	}
+	return 0
+})
+
+func showWin32FolderPicker(ownerHWND uintptr, initialDir string) (string, bool, error) {
+	var displayName [520]uint16
+	titlePtr, _ := windows.UTF16PtrFromString("请选择 1080P 监控录像分片 (MP4) 的本地存储文件夹：")
+
+	var initDirPtr *uint16
+	cleanInit := strings.TrimSpace(initialDir)
+	if cleanInit != "" && !strings.HasPrefix(cleanInit, `\\`) {
+		if abs, err := filepath.Abs(cleanInit); err == nil {
+			cleanInit = abs
+		}
+		if st, err := os.Stat(cleanInit); err == nil && st.IsDir() {
+			initDirPtr, _ = windows.UTF16PtrFromString(cleanInit)
+		}
+	}
+
+	bi := browseInfoW{
+		HwndOwner:      ownerHWND,
+		PszDisplayName: &displayName[0],
+		LpszTitle:      titlePtr,
+		// BIF_RETURNONLYFSDIRS (0x01) | BIF_EDITBOX (0x10) | BIF_NEWDIALOGSTYLE (0x40)
+		UlFlags: 0x00000051,
+	}
+	if initDirPtr != nil {
+		bi.Lpfn = browseFolderCallback
+		bi.LParam = uintptr(unsafe.Pointer(initDirPtr))
+	}
+
+	pidl, _, _ := procSHBrowseForFolderW.Call(uintptr(unsafe.Pointer(&bi)))
+	if pidl == 0 {
+		return "", true, nil
+	}
+	defer procCoTaskMemFree.Call(pidl)
+
+	var pathBuf [520]uint16
+	ok, _, _ := procSHGetPathFromIDList.Call(pidl, uintptr(unsafe.Pointer(&pathBuf[0])))
+	if ok == 0 {
+		return "", true, nil
+	}
+	selected := strings.TrimSpace(windows.UTF16ToString(pathBuf[:]))
+	if selected == "" {
+		return "", true, nil
+	}
+	return selected, false, nil
+}
+
+func selectNativeStorageFolder(initialDir string) (string, bool, error) {
+	winWindowMu.Lock()
+	w := activeWebView
+	hwnd := activeMainHWND
+	winWindowMu.Unlock()
+
+	type pickResult struct {
+		path      string
+		cancelled bool
+		err       error
+	}
+
+	if w != nil && hwnd != 0 {
+		ch := make(chan pickResult, 1)
+		w.Dispatch(func() {
+			p, c, err := showWin32FolderPicker(hwnd, initialDir)
+			ch <- pickResult{path: p, cancelled: c, err: err}
+		})
+		res := <-ch
+		return res.path, res.cancelled, res.err
+	}
+
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	_, _, _ = procCoInitializeEx.Call(0, 2 /* COINIT_APARTMENTTHREADED */)
+	return showWin32FolderPicker(0, initialDir)
+}
+
+func resolveInitialWindowBounds(logicalW, logicalH int) (width, height, minW, minH int) {
+	dpi := 96
+	if procGetDpiForSystem.Find() == nil {
+		if r, _, _ := procGetDpiForSystem.Call(); r >= 96 && r <= 480 {
+			dpi = int(r)
+		}
+	}
+	scale := func(v int) int {
+		return (v*dpi + 48) / 96
+	}
+	width = scale(logicalW)
+	height = scale(logicalH)
+	minW = scale(760)
+	minH = scale(500)
+
+	if procGetSystemMetrics.Find() == nil {
+		screenW, _, _ := procGetSystemMetrics.Call(0 /* SM_CXSCREEN */)
+		screenH, _, _ := procGetSystemMetrics.Call(1 /* SM_CYSCREEN */)
+		if screenW > 0 && screenH > 0 {
+			maxW := int(screenW) * 88 / 100
+			maxH := int(screenH) * 86 / 100
+			if width > maxW {
+				width = maxW
+			}
+			if height > maxH {
+				height = maxH
+			}
+			if minW > maxW {
+				minW = maxW
+			}
+			if minH > maxH {
+				minH = maxH
+			}
+		}
+	}
+	return width, height, minW, minH
+}
 
 type dwmMargins struct {
 	CxLeftWidth    int32
@@ -60,23 +207,13 @@ func applyWindowsImmersiveTheme(hwnd uintptr, dark bool) {
 	_, _, _ = procDwmSetWindowAttr.Call(hwnd, 36, uintptr(unsafe.Pointer(&textColor)), unsafe.Sizeof(textColor))
 }
 
-func runNativeDesktopWindow(appURL string) {
+func runNativeDesktopWindow(appURL string, startInTray bool) {
 	localAppData := os.Getenv("LOCALAPPDATA")
 	if localAppData == "" {
 		localAppData = os.TempDir()
 	}
 	dataPath := filepath.Join(localAppData, "FocusCameraWebView2")
 	_ = os.MkdirAll(dataPath, 0o755)
-
-	// Extract official signed WebView2Loader.dll to disk and register its directory
-	// so Windows loads it via native OS LoadLibraryW (compatible with Windows 11 ARM64 VM & x64).
-	if len(webviewloader.WebView2Loader) > 0 {
-		dllPath := filepath.Join(dataPath, "WebView2Loader.dll")
-		if info, err := os.Stat(dllPath); err != nil || info.Size() != int64(len(webviewloader.WebView2Loader)) {
-			_ = os.WriteFile(dllPath, webviewloader.WebView2Loader, 0o755)
-		}
-		_ = windows.SetDllDirectory(dataPath)
-	}
 
 	// Configure WebView2 Chromium engine flags for zero-prompt microphone intercom,
 	// unmuted audio monitoring, and unthrottled 29-channel live video decoding.
@@ -86,24 +223,40 @@ func runNativeDesktopWindow(appURL string) {
 	)
 
 	if ver, err := webviewloader.GetInstalledVersion(); err == nil && ver != "" {
-		log.Printf("检测到系统 WebView2 运行时 (%s)，正在启动原生 Win32 桌面窗口...", ver)
+		log.Printf("检测到系统 WebView2 运行时 (%s)，正在启动原生 Win32 桌面窗口 (startInTray=%v)...", ver, startInTray)
+		initW, initH, _, _ := resolveInitialWindowBounds(1640, 960)
 		w := webview2.NewWithOptions(webview2.WebViewOptions{
 			Debug:     true,
-			AutoFocus: true,
+			AutoFocus: !startInTray,
 			DataPath:  dataPath,
 			WindowOptions: webview2.WindowOptions{
 				Title:  "Focus Camera · 高清监控与 NVR 中心",
-				Width:  1640,
-				Height: 960,
+				Width:  uint(initW),
+				Height: uint(initH),
 				IconId: 1,
 				Center: true,
 			},
 		})
 		if w != nil {
-			defer w.Destroy()
 			hwnd := uintptr(w.Window())
+			winWindowMu.Lock()
+			activeWebView = w
+			activeMainHWND = hwnd
+			winWindowMu.Unlock()
+			defer func() {
+				winWindowMu.Lock()
+				activeWebView = nil
+				activeMainHWND = 0
+				winWindowMu.Unlock()
+				w.Destroy()
+			}()
 			applyWindowsImmersiveTheme(hwnd, true)
-			w.Init("window.__FOCUS_PLATFORM__ = 'windows';")
+			if startInTray {
+				w.MinimizeToTray()
+			} else {
+				_, _, _ = procShowWindow.Call(hwnd, 3 /* SW_MAXIMIZE */)
+			}
+			w.Init("window.__FOCUS_PLATFORM__ = 'windows'; document.documentElement.dataset.windowMaximized = 'true';")
 			_ = w.Bind("focusSyncWindowTheme", func(theme string) {
 				w.Dispatch(func() {
 					applyWindowsImmersiveTheme(hwnd, theme != "light")
@@ -112,30 +265,17 @@ func runNativeDesktopWindow(appURL string) {
 			_ = w.Bind("focusWindowControl", func(action string) {
 				w.Dispatch(func() {
 					switch action {
-					case "drag":
-						_, _, _ = procReleaseCapture.Call()
-						_, _, _ = procPostMessageW.Call(hwnd, 0x00A1 /* WM_NCLBUTTONDOWN */, 2 /* HTCAPTION */, 0)
 					case "minimize":
 						_, _, _ = procShowWindow.Call(hwnd, 6 /* SW_MINIMIZE */)
 					case "tray":
 						w.MinimizeToTray()
 					case "remove-tray":
 						w.RemoveTrayIcon()
-					case "maximize":
-						zoomed, _, _ := procIsZoomed.Call(hwnd)
-						if zoomed != 0 {
-							_, _, _ = procShowWindow.Call(hwnd, 9 /* SW_RESTORE */)
-							w.Eval("document.documentElement.dataset.windowMaximized = 'false';")
-						} else {
-							_, _, _ = procShowWindow.Call(hwnd, 3 /* SW_MAXIMIZE */)
-							w.Eval("document.documentElement.dataset.windowMaximized = 'true';")
-						}
 					case "close":
 						w.Eval("window.dispatchEvent(new CustomEvent('focus-request-close'));")
 					}
 				})
 			})
-			w.SetSize(1640, 960, webview2.HintNone)
 			w.Navigate(appURL)
 			w.Run()
 			return
@@ -144,7 +284,9 @@ func runNativeDesktopWindow(appURL string) {
 		log.Printf("未检测到系统 WebView2 运行时 (err=%v)，回退至独立应用窗口模式", err)
 	}
 
-	launchFallbackWindow(appURL, dataPath)
+	if !startInTray {
+		launchFallbackWindow(appURL, dataPath)
+	}
 	// Keep HTTP/WebSocket backend server alive! Never exit on launcher handoff.
 	select {}
 }

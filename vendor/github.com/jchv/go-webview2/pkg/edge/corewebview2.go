@@ -251,6 +251,9 @@ type iCoreWebView2CreateCoreWebView2EnvironmentCompletedHandler struct {
 }
 
 func _ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandlerIUnknownQueryInterface(this *iCoreWebView2CreateCoreWebView2EnvironmentCompletedHandler, refiid, object uintptr) uintptr {
+	if object != 0 {
+		*(*uintptr)(unsafe.Pointer(object)) = uintptr(unsafe.Pointer(this))
+	}
 	return this.impl.QueryInterface(refiid, object)
 }
 
@@ -300,6 +303,9 @@ type iCoreWebView2WebMessageReceivedEventHandler struct {
 }
 
 func _ICoreWebView2WebMessageReceivedEventHandlerIUnknownQueryInterface(this *iCoreWebView2WebMessageReceivedEventHandler, refiid, object uintptr) uintptr {
+	if object != 0 {
+		*(*uintptr)(unsafe.Pointer(object)) = uintptr(unsafe.Pointer(this))
+	}
 	return this.impl.QueryInterface(refiid, object)
 }
 
@@ -349,6 +355,9 @@ type iCoreWebView2PermissionRequestedEventHandler struct {
 }
 
 func _ICoreWebView2PermissionRequestedEventHandlerIUnknownQueryInterface(this *iCoreWebView2PermissionRequestedEventHandler, refiid, object uintptr) uintptr {
+	if object != 0 {
+		*(*uintptr)(unsafe.Pointer(object)) = uintptr(unsafe.Pointer(this))
+	}
 	return this.impl.QueryInterface(refiid, object)
 }
 

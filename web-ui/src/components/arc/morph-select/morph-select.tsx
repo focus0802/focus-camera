@@ -448,7 +448,7 @@ export function MorphSelect({ label, hideLabel = false, items, value, defaultVal
                   </div>
                   : <div key={section.key} role="presentation" className={styles.group}>{rows}</div>;
               })}
-              {resultCount === 0 && <p className={styles.empty}>No matches for “{query.trim()}”</p>}
+              {resultCount === 0 && <p className={styles.empty}>未找到匹配 “{query.trim()}” 的选项</p>}
             </div>
           </div>
         </motion.div>

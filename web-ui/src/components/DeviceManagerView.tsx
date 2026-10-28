@@ -11,7 +11,6 @@ import {
   Trash2,
   Video,
   VideoOff,
-  Wifi,
   X,
 } from "lucide-react";
 import type {
@@ -24,8 +23,6 @@ import type {
 import { VendorIcon, VENDOR_PRESETS, getVendorMeta } from "./VendorIcon";
 import { Input } from "./arc/input/input";
 import { PasswordField } from "./arc/password-field/password-field";
-import { NumberField } from "./arc/number-field/number-field";
-import { TimePicker } from "./arc/time-picker/time-picker";
 import { MorphSelect } from "./arc/morph-select/morph-select";
 import { SearchField } from "./arc/search-field/search-field";
 import { ScrollArea } from "./arc/scroll-area/scroll-area";
@@ -51,8 +48,7 @@ interface DeviceManagerViewProps {
   defaultSubnet: string;
   defaultUsername?: string;
   defaultPassword?: string;
-  policyModalOpen?: boolean;
-  onPolicyModalOpenChange?: (open: boolean) => void;
+  onOpenSettingsModal: () => void;
   onOpenReorderModal?: () => void;
   onScanCompleteAndAdded: () => Promise<void>;
   onToggleCameraAutoRecord: (cameraId: string, enabled: boolean) => Promise<void>;
@@ -61,7 +57,6 @@ interface DeviceManagerViewProps {
   onDeleteCamera: (id: string) => Promise<void>;
   onClearAllCameras: () => Promise<void>;
   onRebootCamera: (camera: Camera) => Promise<void>;
-  onSaveSettings: (cfg: RecordingConfig) => Promise<void>;
 }
 
 interface EditableDiscovered extends DiscoveredCamera {
@@ -121,8 +116,7 @@ export function DeviceManagerView({
   defaultSubnet,
   defaultUsername = "admin",
   defaultPassword = "",
-  policyModalOpen = false,
-  onPolicyModalOpenChange,
+  onOpenSettingsModal,
   onOpenReorderModal,
   onScanCompleteAndAdded,
   onToggleCameraAutoRecord,
@@ -131,7 +125,6 @@ export function DeviceManagerView({
   onDeleteCamera,
   onClearAllCameras,
   onRebootCamera,
-  onSaveSettings,
 }: DeviceManagerViewProps) {
   // 1. Compact LAN Scan Bar State
   const [subnet, setSubnet] = useState<string>(defaultSubnet || "192.168.1");
@@ -147,7 +140,6 @@ export function DeviceManagerView({
   }, [defaultPassword]);
   const [scanning, setScanning] = useState<boolean>(false);
   const [scanItems, setScanItems] = useState<EditableDiscovered[]>([]);
-  const [hasScanned, setHasScanned] = useState<boolean>(false);
   const [batchAdding, setBatchAdding] = useState<boolean>(false);
   const [banner, setBanner] = useState<{
     tone: "info" | "success" | "warning" | "danger";
@@ -166,7 +158,7 @@ export function DeviceManagerView({
   const [page, setPage] = useState<number>(1);
   const [pageSize, setPageSize] = useState<number>(30);
 
-  // 3. Modals State (Add/Edit Camera Modal + Policy Modal + Delete/Clear Confirm Modals)
+  // 3. Modals State (Add/Edit Camera Modal + Delete/Clear Confirm Modals)
   const [editingCam, setEditingCam] = useState<Partial<Camera> | null>(null);
   const [isEditMode, setIsEditMode] = useState<boolean>(false);
   const [originalIP, setOriginalIP] = useState<string>("");
@@ -187,20 +179,6 @@ export function DeviceManagerView({
   const [deletingCam, setDeletingCam] = useState<boolean>(false);
   const [confirmClearAllOpen, setConfirmClearAllOpen] = useState<boolean>(false);
   const [clearingAll, setClearingAll] = useState<boolean>(false);
-  const [localPolicyOpen, setLocalPolicyOpen] = useState<boolean>(false);
-  const isPolicyOpen = policyModalOpen || localPolicyOpen;
-  const setPolicyOpen = (open: boolean) => {
-    setLocalPolicyOpen(open);
-    onPolicyModalOpenChange?.(open);
-  };
-
-  // 4. Storage & Recording Policy Form State
-  const [cfgForm, setCfgForm] = useState<RecordingConfig>(recordingConfig);
-  const [savingCfg, setSavingCfg] = useState<boolean>(false);
-
-  useEffect(() => {
-    setCfgForm(recordingConfig);
-  }, [recordingConfig]);
 
   useEffect(() => {
     setPage(1);
@@ -249,20 +227,18 @@ export function DeviceManagerView({
         autoRecord: false,
       }));
       setScanItems(mapped);
-      setHasScanned(true);
 
       const newCount = mapped.filter((i) => i.status === "new").length;
       const shiftCount = mapped.filter((i) => i.status === "ip_shifted").length;
       const unauthCount = mapped.filter((i) => !i.authOk).length;
       setBanner({
         tone: mapped.length > 0 ? (unauthCount > 0 ? "info" : "success") : "warning",
-        title: `扫描完成：在 ${scannedSubnet}.1~254 网段共发现 ${mapped.length} 台 RTSP / ONVIF 摄像头`,
-        detail:
+        title:
           mapped.length > 0
-            ? unauthCount > 0
-              ? `新发现 ${newCount} 台，IP 漂移 ${shiftCount} 台。其中 ${unauthCount} 台设有独立密码暂未通过验证，您可在下方表格对应行单独输入密码并点击「验证读取」，或填好密码后直接点击「入库 / 更新所选」。`
-              : `其中新发现 ${newCount} 台，IP 发生漂移 ${shiftCount} 台（已自动识别设备品牌、型号与码流路径，核对名称后点击「入库 / 更新所选」即可）。`
-            : "请确认本机网卡是否处于该局域网段，且摄像头已开启 RTSP (554) 或 ONVIF 服务。",
+            ? `扫描完成：共发现 ${mapped.length} 台设备（新发现 ${newCount} 台${
+                shiftCount > 0 ? `，IP 变更 ${shiftCount} 台` : ""
+              }${unauthCount > 0 ? `，待验证密码 ${unauthCount} 台` : ""}）`
+            : `扫描完成：${scannedSubnet}.1~254 网段未发现设备`,
       });
     } catch (err) {
       setBanner({
@@ -430,8 +406,7 @@ export function DeviceManagerView({
       }
       setBanner({
         tone: "success",
-        title: `摄像头机身静态 IP 修改成功：${oldIP} → ${appliedIP}`,
-        detail: "设备已切换至新静态 IP 并自动设置为固定 IP 模式，防止路由器重启后再次漂移。",
+        title: `静态 IP 已修改：${oldIP} → ${appliedIP}`,
       });
     } catch (err) {
       setScanItems((prev) =>
@@ -558,12 +533,7 @@ export function DeviceManagerView({
       );
       setBanner({
         tone: "success",
-        title: `已成功入库 / 更新 ${selectedScanItems.length} 台摄像头`,
-        detail: `新增 ${data.added ?? 0} 台，同步更新 ${data.updated ?? 0} 台${
-          resolvedIPByOldIP.size > 0
-            ? `（其中 ${resolvedIPByOldIP.size} 台已同步修改机身硬件静态 IP）`
-            : ""
-        }，当前总计管理 ${data.total ?? cameras.length} 台设备。`,
+        title: `已入库 / 更新 ${selectedScanItems.length} 台摄像头（新增 ${data.added ?? 0} 台，更新 ${data.updated ?? 0} 台）`,
       });
     } catch (err) {
       setBanner({
@@ -796,28 +766,11 @@ export function DeviceManagerView({
       if (hardwareIPUpdated) {
         setBanner({
           tone: "success",
-          title: `摄像头硬件静态 IP 已修改生效：${originalIP} → ${updatedCam.ip}`,
-          detail: `已将「${updatedCam.name || updatedCam.ip}」机身设为固定静态 IP (${updatedCam.ip})，历史 1080P 录像目录与实时流已自动平滑迁移。`,
+          title: `静态 IP 已更新：${originalIP} → ${updatedCam.ip}`,
         });
       }
     } finally {
       setSavingManualCam(false);
-    }
-  }
-
-  async function handleSavePolicyForm(e: React.FormEvent) {
-    e.preventDefault();
-    setSavingCfg(true);
-    try {
-      await onSaveSettings(cfgForm);
-      setPolicyOpen(false);
-      setBanner({
-        tone: "success",
-        title: "1080P 录像与存储策略已保存生效",
-        detail: `存储路径: ${cfgForm.storage_dir} · 分片时长: ${cfgForm.segment_minutes} 分钟 · 保留 ${cfgForm.retention_days} 天`,
-      });
-    } finally {
-      setSavingCfg(false);
     }
   }
 
@@ -898,7 +851,7 @@ export function DeviceManagerView({
     },
     {
       key: "rec_status_sort",
-      label: "当前录像状态 (1080P)",
+      label: "录像状态",
       sortable: true,
       numeric: false,
       width: "15%",
@@ -951,12 +904,12 @@ export function DeviceManagerView({
             </Badge>
           );
         }
-        return <span className="text-muted-sm">未开启自动录像</span>;
+        return <span className="text-muted-sm">待命</span>;
       },
     },
     {
       key: "auto_record_num",
-      label: "后台自动录像",
+      label: "自动录像",
       sortable: true,
       numeric: false,
       width: "9%",
@@ -964,13 +917,13 @@ export function DeviceManagerView({
         <Switch
           checked={Boolean(row.auto_record)}
           onCheckedChange={(on) => void onToggleCameraAutoRecord(row.id, on)}
-          label={row.auto_record ? "已开启" : "关闭"}
+          aria-label={`${row.name} 自动录像`}
         />
       ),
     },
     {
       key: "actions",
-      label: "设备维护与操作",
+      label: "操作",
       sortable: false,
       numeric: false,
       width: "13%",
@@ -986,15 +939,14 @@ export function DeviceManagerView({
                 await onRebootCamera(row);
                 setBanner({
                   tone: "info",
-                  title: `已向 ${row.name} (${row.ip}) 发送远程重启指令`,
-                  detail: "摄像头将在约 25 秒内重启完毕并释放所有卡死的 RTSP 通道。",
+                  title: `已向 ${row.name} (${row.ip}) 发送重启指令`,
                 });
               } finally {
                 setRebootingId(null);
               }
             }}
             aria-label={`重启 ${row.name}`}
-            title="当摄像头报 406 通道占满时，可一键远程重启摄像头释放通道"
+            title="远程重启摄像头"
           >
             <RotateCcw size={12} />
             <span>{rebootingId === row.id ? "重启中" : "重启"}</span>
@@ -1066,12 +1018,7 @@ export function DeviceManagerView({
         <form className="discovery-compact-bar" onSubmit={handleRunScan}>
           <div className="discovery-compact-bar__title">
             <Radar size={16} className="playback-kpi-pill__icon" />
-            <div>
-              <strong>局域网自动发现</strong>
-              <span className="discovery-compact-bar__hint">
-                并发探测 RTSP (554/8554) 与 ONVIF 端口，自动识别海康、大华、TP-LINK 等多品牌设备与流路径
-              </span>
-            </div>
+            <strong>局域网自动发现</strong>
           </div>
 
           <div className="discovery-compact-bar__inputs">
@@ -1116,13 +1063,6 @@ export function DeviceManagerView({
             </Button>
           </div>
         </form>
-
-        {hasScanned && scanItems.length === 0 && (
-          <div className="scan-empty-inline">
-            <Wifi size={16} />
-            <span>未在该网段发现开启 RTSP (554/8554) 或 ONVIF 的摄像头，请检查网段或手动添加。</span>
-          </div>
-        )}
 
         {scanItems.length > 0 && (
           <div className="scan-results-box">
@@ -1194,7 +1134,6 @@ export function DeviceManagerView({
                   size="sm"
                   onClick={() => {
                     setScanItems([]);
-                    setHasScanned(false);
                   }}
                 >
                   <X size={14} />
@@ -1214,12 +1153,12 @@ export function DeviceManagerView({
                   <tr>
                     <th style={{ width: 44 }}>选择</th>
                     <th style={{ width: 145 }}>状态 / 鉴权</th>
-                    <th style={{ width: 195 }}>IP 地址 (可直接修改机身静态 IP)</th>
-                    <th style={{ width: 235 }}>访问密码 (支持按台单独填密码验证)</th>
-                    <th>设备名称 (自动读取机内名称，可直接修改)</th>
-                    <th style={{ width: 145 }}>所属分组 (可自定义)</th>
+                    <th style={{ width: 195 }}>IP 地址</th>
+                    <th style={{ width: 235 }}>访问密码</th>
+                    <th>设备名称</th>
+                    <th style={{ width: 145 }}>所属分组</th>
                     <th style={{ width: 140 }}>硬件型号 / 协议</th>
-                    <th style={{ width: 92 }}>自动录1080P</th>
+                    <th style={{ width: 92 }}>自动录像</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1448,10 +1387,7 @@ export function DeviceManagerView({
       <section className="panel-card device-table-card" aria-label="已管理摄像头列表">
         <div className="device-table-card__top">
           <div className="device-table-card__title">
-            <h2>已管理摄像头列表 ({cameras.length} 台)</h2>
-            <span>
-              支持表头排序、分组筛选、1080P 自动录像开关与远程重启
-            </span>
+            <h2>已管理摄像头 ({cameras.length} 台)</h2>
           </div>
 
           <div className="toolbar-btn-row">
@@ -1460,10 +1396,9 @@ export function DeviceManagerView({
               size="sm"
               disabled={cameras.length === 0 || allAutoRecordOn}
               onClick={() => void onToggleAllAutoRecord(true)}
-              title={allAutoRecordOn ? "当前所有摄像头均已开启后台自动录像" : "一键开启所有摄像头的后台自动录像"}
             >
               <Video size={14} />
-              <span>{allAutoRecordOn ? "已全部开启自动录像" : "开启全部自动录像"}</span>
+              <span>{allAutoRecordOn ? "已全部开启录像" : "开启全部录像"}</span>
             </Button>
             {anyAutoRecordOn && (
               <Button
@@ -1473,18 +1408,18 @@ export function DeviceManagerView({
                 onClick={() => void onToggleAllAutoRecord(false)}
               >
                 <VideoOff size={14} />
-                <span>关闭全部自动录像</span>
+                <span>关闭全部录像</span>
               </Button>
             )}
             {onOpenReorderModal && cameras.length > 1 && (
               <Button variant="secondary" size="sm" onClick={onOpenReorderModal}>
                 <ArrowUpDown size={14} />
-                <span>调整排序</span>
+                <span>排序</span>
               </Button>
             )}
-            <Button variant="secondary" size="sm" onClick={() => setPolicyOpen(true)}>
+            <Button variant="secondary" size="sm" onClick={onOpenSettingsModal}>
               <Clock size={14} />
-              <span>录像与存储策略</span>
+              <span>录像存储</span>
             </Button>
             <Button
               variant="primary"
@@ -1514,7 +1449,7 @@ export function DeviceManagerView({
               }}
             >
               <Plus size={14} />
-              <span>手动添加单台</span>
+              <span>添加摄像头</span>
             </Button>
             {cameras.length > 0 && (
               <Button
@@ -1523,7 +1458,7 @@ export function DeviceManagerView({
                 onClick={() => setConfirmClearAllOpen(true)}
               >
                 <Trash2 size={14} />
-                <span>清空列表</span>
+                <span>清空</span>
               </Button>
             )}
           </div>
@@ -1532,8 +1467,7 @@ export function DeviceManagerView({
         {cameras.length === 0 ? (
           <EmptyState
             icon={<Radar width={24} height={24} />}
-            title="当前尚未添加任何摄像头"
-            description="请使用上方的「局域网自动发现」一键扫描并批量勾选入库，或点击「手动添加单台」录入。"
+            title="尚未添加摄像头"
           />
         ) : (
           <>
@@ -1634,8 +1568,7 @@ export function DeviceManagerView({
         {editingCam && (
           <DialogContent
             className="form-dialog-content"
-            title={isEditMode ? `编辑摄像头: ${editingCam.name}` : "手动添加单台摄像头"}
-            description="选择品牌预设可自动填充码流路径，或点击左下方按钮自动探测设备信息。"
+            title={isEditMode ? `编辑摄像头: ${editingCam.name}` : "添加摄像头"}
           >
             <form className="modal-form-stack" onSubmit={handleSaveManualForm}>
               <div className="manual-cam-grid">
@@ -1662,7 +1595,7 @@ export function DeviceManagerView({
                   panelWidth={268}
                 />
                 <Input
-                  label={isEditMode ? "目标 IP 地址 (可修改机身 IP)" : "IP 地址"}
+                  label="IP 地址"
                   required
                   value={editingCam.ip || ""}
                   onChange={(e) => {
@@ -1677,10 +1610,10 @@ export function DeviceManagerView({
                   placeholder="例如：192.168.1.202"
                 />
                 <Input
-                  label="设备名称 (留空可自动读取)"
+                  label="设备名称"
                   value={editingCam.name || ""}
                   onChange={(e) => setEditingCam({ ...editingCam, name: e.target.value })}
-                  placeholder="留空则保存时自动探测名称"
+                  placeholder="留空则自动读取"
                 />
                 {customGroupMode ? (
                   <div className="custom-group-field">
@@ -1744,7 +1677,7 @@ export function DeviceManagerView({
                   onChange={(e) => setEditingCam({ ...editingCam, username: e.target.value })}
                 />
                 <PasswordField
-                  label="访问密码 (无密码则留空)"
+                  label="访问密码"
                   value={editingCam.password || ""}
                   onChange={(e) =>
                     setEditingCam({
@@ -1753,14 +1686,14 @@ export function DeviceManagerView({
                       no_password: e.target.value === "",
                     })
                   }
-                  placeholder="输入密码，无密码请留空"
+                  placeholder="无密码可留空"
                   messages={{
                     showPassword: "显示密码",
                     hidePassword: "隐藏密码",
                   }}
                 />
                 <Input
-                  label="主码流路径 (高清录像 / 放大)"
+                  label="主码流路径"
                   value={editingCam.main_stream_path || ""}
                   onChange={(e) =>
                     setEditingCam({ ...editingCam, main_stream_path: e.target.value })
@@ -1768,7 +1701,7 @@ export function DeviceManagerView({
                   placeholder="例如：/stream1"
                 />
                 <Input
-                  label="子码流路径 (多宫格墙预览)"
+                  label="子码流路径"
                   value={editingCam.sub_stream_path || ""}
                   onChange={(e) =>
                     setEditingCam({ ...editingCam, sub_stream_path: e.target.value })
@@ -1783,12 +1716,12 @@ export function DeviceManagerView({
                     <Switch
                       checked={syncHardwareIP}
                       onCheckedChange={setSyncHardwareIP}
-                      label="同步写入摄像头机身硬件静态 IP（自动预检 IP 冲突并平滑迁移历史录像）"
+                      label="同步修改机身硬件静态 IP"
                     />
                     <div className="hw-network-box__badges">
                       {loadingHwNet ? (
                         <Badge tone="neutral" size="sm">
-                          正在读取机身网络…
+                          读取中…
                         </Badge>
                       ) : hwNetInfo ? (
                         <>
@@ -1796,19 +1729,17 @@ export function DeviceManagerView({
                             tone={hwNetInfo.proto === "static" ? "info" : "warning"}
                             size="sm"
                           >
-                            {hwNetInfo.proto === "static"
-                              ? "当前机身: 静态 IP"
-                              : "当前机身: DHCP 动态分配"}
+                            {hwNetInfo.proto === "static" ? "静态 IP" : "DHCP"}
                           </Badge>
                           {hwNetInfo.mac && (
                             <Badge tone="neutral" size="sm">
-                              MAC: {hwNetInfo.mac}
+                              {hwNetInfo.mac}
                             </Badge>
                           )}
                         </>
                       ) : (
                         <Badge tone="warning" size="sm">
-                          原 IP ({originalIP}) 暂未连通管理口
+                          原 IP ({originalIP}) 暂未连通
                         </Badge>
                       )}
                     </div>
@@ -1816,13 +1747,13 @@ export function DeviceManagerView({
                   {syncHardwareIP && (
                     <div className="hw-network-box__grid">
                       <Input
-                        label="子网掩码 (静态 IP)"
+                        label="子网掩码"
                         value={hwNetmask}
                         onChange={(e) => setHwNetmask(e.target.value)}
                         placeholder="255.255.255.0"
                       />
                       <Input
-                        label="默认网关 (静态 IP)"
+                        label="默认网关"
                         value={hwGateway}
                         onChange={(e) => setHwGateway(e.target.value)}
                         placeholder={inferGatewayFromIP(editingCam.ip)}
@@ -1848,7 +1779,7 @@ export function DeviceManagerView({
                   onClick={() => void handleProbeModalCamera()}
                 >
                   <Radar size={14} />
-                  <span>验证并读取设备信息</span>
+                  <span>验证连接</span>
                 </Button>
                 <div className="manual-cam-actions__right">
                   <Button
@@ -1875,8 +1806,8 @@ export function DeviceManagerView({
                       syncHardwareIP &&
                       editingCam.ip?.trim() &&
                       editingCam.ip.trim() !== originalIP
-                        ? `修改机身静态 IP 并保存`
-                        : `保存摄像头配置`}
+                        ? `修改 IP 并保存`
+                        : `保存`}
                     </span>
                   </Button>
                 </div>
@@ -1884,106 +1815,6 @@ export function DeviceManagerView({
             </form>
           </DialogContent>
         )}
-      </Dialog>
-
-      {/* Modal 2: 1080P Recording & Disk Quota Policy Dialog */}
-      <Dialog open={isPolicyOpen} onOpenChange={setPolicyOpen}>
-        <DialogContent
-          className="form-dialog-content"
-          title="1080P 高清录像存储与计划策略"
-          description="系统统一拉取摄像头 1080P 主码流 (stream1) + 房间声音写入抗断电损坏的标准 MP4 文件。"
-        >
-          <form className="modal-form-stack" onSubmit={handleSavePolicyForm}>
-            <div className="policy-form-grid">
-              <div className="policy-full-span">
-                <Input
-                  label="本地录像存储文件夹路径"
-                  value={cfgForm.storage_dir}
-                  onChange={(e) => setCfgForm({ ...cfgForm, storage_dir: e.target.value })}
-                  description="支持相对路径 (./recordings) 或绝对路径"
-                />
-              </div>
-              <NumberField
-                label="单个 MP4 分片时长"
-                min={1}
-                max={120}
-                step={5}
-                value={cfgForm.segment_minutes}
-                onValueChange={(v) => setCfgForm({ ...cfgForm, segment_minutes: v })}
-                suffix=" 分钟"
-                scrub
-                description="建议 15 分钟，到点无感切分新文件"
-              />
-              <NumberField
-                label="自动保留天数"
-                min={1}
-                max={365}
-                step={1}
-                value={cfgForm.retention_days}
-                onValueChange={(v) => setCfgForm({ ...cfgForm, retention_days: v })}
-                suffix=" 天"
-                scrub
-                description="超过该天数的历史录像将自动清理"
-              />
-              <NumberField
-                label="磁盘空间上限配额"
-                min={10}
-                max={20000}
-                step={50}
-                value={cfgForm.max_storage_gb}
-                onValueChange={(v) => setCfgForm({ ...cfgForm, max_storage_gb: v })}
-                suffix=" GB"
-                scrub
-                description="达到上限时自动淘汰最旧的录像分片"
-              />
-
-              <div className="schedule-row">
-                <Switch
-                  checked={cfgForm.schedule_enabled}
-                  onCheckedChange={(on) => setCfgForm({ ...cfgForm, schedule_enabled: on })}
-                  label="启用每日定时自动录像时间段（关闭则 24 小时全天自动录像）"
-                />
-                {cfgForm.schedule_enabled && (
-                  <div className="schedule-times">
-                    <TimePicker
-                      label="每日开始时间"
-                      format="24h"
-                      minuteStep={15}
-                      value={cfgForm.schedule_start_time}
-                      onChange={(val) =>
-                        setCfgForm({ ...cfgForm, schedule_start_time: val })
-                      }
-                    />
-                    <TimePicker
-                      label="每日结束时间"
-                      format="24h"
-                      minuteStep={15}
-                      value={cfgForm.schedule_end_time}
-                      onChange={(val) =>
-                        setCfgForm({ ...cfgForm, schedule_end_time: val })
-                      }
-                    />
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="manual-cam-actions">
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={() => setPolicyOpen(false)}
-              >
-                取消
-              </Button>
-              <Button type="submit" variant="primary" size="sm" loading={savingCfg}>
-                <Save size={14} />
-                <span>保存录像与存储策略</span>
-              </Button>
-            </div>
-          </form>
-        </DialogContent>
       </Dialog>
 
       {/* Modal 3: Remove Single Camera Confirmation Dialog */}
@@ -1996,7 +1827,7 @@ export function DeviceManagerView({
         {pendingDeleteCam && (
           <DialogContent
             title={`移除摄像头：${pendingDeleteCam.name}`}
-            description={`确定从监控列表中移除「${pendingDeleteCam.name} (${pendingDeleteCam.ip})」吗？移除后将停止该房间的实时预览与后台自动录像，但已保存在本地磁盘的 1080P 历史录像文件不会被删除。`}
+            description={`确定移除「${pendingDeleteCam.name} (${pendingDeleteCam.ip})」吗？本地历史录像文件将保留。`}
           >
             <div className="manual-cam-actions">
               <Button
@@ -2040,8 +1871,8 @@ export function DeviceManagerView({
       >
         {confirmClearAllOpen && (
           <DialogContent
-            title="清空全部已管理摄像头"
-            description={`确定要清空当前全部 ${cameras.length} 台摄像头配置吗？后台自动录像将立即停止，但已保存在本地磁盘的 1080P 历史录像文件不会被删除。`}
+            title="清空全部摄像头"
+            description={`确定清空全部 ${cameras.length} 台摄像头配置吗？本地历史录像文件将保留。`}
           >
             <div className="manual-cam-actions">
               <Button

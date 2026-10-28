@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>FocusCamera — 琴房与教室多路高清监控 · 双向语音对讲 · 1080P 自动录制客户端</title>
+  <title>FocusCamera</title>
   <style>
     :root {
       --bg: #090b10;
@@ -99,31 +99,12 @@
       padding: 68px 0 44px;
       text-align: center;
     }
-    .hero-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 6px 14px;
-      border-radius: 999px;
-      background: rgba(16, 185, 129, 0.1);
-      border: 1px solid rgba(16, 185, 129, 0.3);
-      color: #34d399;
-      font-size: 13px;
-      font-weight: 500;
-      margin-bottom: 20px;
-    }
     h1 {
       font-size: clamp(30px, 4.5vw, 48px);
       font-weight: 800;
       letter-spacing: -0.025em;
       line-height: 1.18;
-      margin-bottom: 16px;
-    }
-    .subtitle {
-      max-width: 680px;
-      margin: 0 auto 40px;
-      color: var(--text-muted);
-      font-size: 16px;
+      margin-bottom: 36px;
     }
 
     .download-grid {
@@ -230,70 +211,6 @@
       background: rgba(255, 255, 255, 0.1);
     }
 
-    .features {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
-      gap: 16px;
-      margin: 24px 0 48px;
-    }
-    .feat-card {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 20px;
-    }
-    .feat-card h3 {
-      font-size: 15px;
-      margin-bottom: 8px;
-      color: var(--text);
-    }
-    .feat-card p {
-      font-size: 13px;
-      color: var(--text-muted);
-    }
-
-    .steps-card {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 28px;
-      margin-bottom: 56px;
-    }
-    .steps-card h2 {
-      font-size: 18px;
-      margin-bottom: 16px;
-    }
-    .steps-list {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-      gap: 18px;
-    }
-    .step-item {
-      background: rgba(255, 255, 255, 0.02);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 16px;
-    }
-    .step-num {
-      display: inline-block;
-      font-family: ui-monospace, SFMono-Regular, monospace;
-      font-size: 12px;
-      font-weight: 700;
-      color: var(--accent);
-      background: rgba(56, 189, 248, 0.12);
-      padding: 2px 8px;
-      border-radius: 6px;
-      margin-bottom: 8px;
-    }
-    .step-item h4 {
-      font-size: 14.5px;
-      margin-bottom: 6px;
-    }
-    .step-item p {
-      font-size: 13px;
-      color: var(--text-muted);
-    }
-
     footer {
       margin-top: auto;
       border-top: 1px solid var(--border);
@@ -313,25 +230,19 @@
     <div class="container nav">
       <div class="brand">
         <span class="brand-dot"></span>
-        <span>FocusCamera 监控对讲中心</span>
-        <span class="version-pill" id="nav-version">v2.2.0</span>
+        <span>FocusCamera</span>
+        <span class="version-pill" id="nav-version">v2.3.0</span>
       </div>
       <div class="nav-links">
-        <a href="https://github.com/focus0802/focus-camera/releases" target="_blank" rel="noopener">历史版本 (Releases)</a>
-        <a href="https://github.com/focus0802/focus-camera" target="_blank" rel="noopener">GitHub 仓库</a>
+        <a href="https://github.com/focus0802/focus-camera/releases" target="_blank" rel="noopener">Releases</a>
+        <a href="https://github.com/focus0802/focus-camera" target="_blank" rel="noopener">GitHub</a>
       </div>
     </div>
   </header>
 
   <main class="container">
     <section class="hero">
-      <div class="hero-badge">
-        <span>● 单文件免安装 · 内置软件内一键安全热升级</span>
-      </div>
-      <h1>琴房与教室高清监控 · 双向语音对讲客户端</h1>
-      <p class="subtitle">
-        专为多路 TP-LINK 局域网摄像头打造。支持 29+ 路实时低延迟同屏监控、:8800 双向语音实时对讲、1080P 音视频同步 MP4 自动录制与历史回放。
-      </p>
+      <h1>FocusCamera 桌面客户端</h1>
 
       <div class="download-grid">
         <!-- Windows Card -->
@@ -339,23 +250,23 @@
           <span class="rec-tag">当前系统推荐</span>
           <div>
             <div class="os-title">
-              <span>🪟 Windows 桌面客户端 (64位)</span>
+              <span>🪟 Windows (x64)</span>
             </div>
-            <p class="os-desc">适用于 Windows 10 / Windows 11 监控主机，单文件免安装，双击即可运行。</p>
+            <p class="os-desc">Windows 10 / 11</p>
           </div>
 
           <div class="meta-box">
             <span>文件名: <strong>FocusCamera-Windows-x64.exe</strong></span>
-            <span>版　本: <strong id="win-ver">v2.2.0</strong> (<span id="win-size">9.6 MB</span>)</span>
+            <span>版　本: <strong id="win-ver">v2.3.0</strong> (<span id="win-size">13.3 MB</span>)</span>
             <span>SHA256: <span id="win-sha">自动校验中…</span></span>
           </div>
 
           <div class="btn-group">
             <a class="btn btn-primary" id="win-mirror-btn" href="https://ghfast.top/https://github.com/focus0802/focus-camera/releases/latest/download/FocusCamera-Windows-x64.exe">
-              ⚡ 立即下载 Windows 版（国内极速通道）
+              ⚡ 下载 Windows 版（国内加速）
             </a>
             <a class="btn btn-secondary" id="win-direct-btn" href="https://github.com/focus0802/focus-camera/releases/latest/download/FocusCamera-Windows-x64.exe">
-              🌐 GitHub 官方直连下载
+              🌐 GitHub 官方直连
             </a>
           </div>
         </div>
@@ -365,65 +276,25 @@
           <span class="rec-tag">当前系统推荐</span>
           <div>
             <div class="os-title">
-              <span>🍎 macOS 原生桌面客户端 (Apple Silicon)</span>
+              <span>🍎 macOS (Apple Silicon)</span>
             </div>
-            <p class="os-desc">适用于搭载 M1 / M2 / M3 / M4 芯片的 Mac 电脑，原生 WebKit 独立窗口。</p>
+            <p class="os-desc">Apple M1 / M2 / M3 / M4</p>
           </div>
 
           <div class="meta-box">
             <span>文件名: <strong>FocusCamera-Mac</strong></span>
-            <span>版　本: <strong id="mac-ver">v2.2.0</strong> (<span id="mac-size">8.4 MB</span>)</span>
+            <span>版　本: <strong id="mac-ver">v2.3.0</strong> (<span id="mac-size">8.4 MB</span>)</span>
             <span>SHA256: <span id="mac-sha">自动校验中…</span></span>
           </div>
 
           <div class="btn-group">
             <a class="btn btn-primary" id="mac-mirror-btn" href="https://ghfast.top/https://github.com/focus0802/focus-camera/releases/latest/download/FocusCamera-Mac">
-              ⚡ 立即下载 macOS 版（国内极速通道）
+              ⚡ 下载 macOS 版（国内加速）
             </a>
             <a class="btn btn-secondary" id="mac-direct-btn" href="https://github.com/focus0802/focus-camera/releases/latest/download/FocusCamera-Mac">
-              🌐 GitHub 官方直连下载
+              🌐 GitHub 官方直连
             </a>
           </div>
-        </div>
-      </div>
-    </section>
-
-    <section class="features">
-      <div class="feat-card">
-        <h3>🎥 多路低延迟实时监控墙</h3>
-        <p>内置 RTSP/TCP 流复用中心与 WebCodecs 硬件解码，支持全部视图、4/9/16 宫格切换、拖拽自定义排序及单击 1080P 全屏放大。</p>
-      </div>
-      <div class="feat-card">
-        <h3>🎙️ :8800 双向语音实时对讲</h3>
-        <p>支持「一键持续对讲」与「长按空格 PTT 对讲」双模式，硬件级 G.711 PCMA 8kHz 音频编解码，带实时麦克风电平反馈。</p>
-      </div>
-      <div class="feat-card">
-        <h3>💾 1080P 音画同步 MP4 录制</h3>
-        <p>纯 Go 自研 fMP4 实时封装引擎（H.264 视频 + AAC 音频），支持每日定时录制、分片落盘、磁盘配额循环覆盖与网页倍速回放。</p>
-      </div>
-      <div class="feat-card">
-        <h3>🔄 软件内一键安全热升级</h3>
-        <p>首次下载后无需再手动打开网页。点击软件顶部版本号即可自动检测新版本、校验 SHA-256 签名并安全封存录像后重启升级。</p>
-      </div>
-    </section>
-
-    <section class="steps-card">
-      <h2>🚀 首次安装与使用指南（仅需 3 步）</h2>
-      <div class="steps-list">
-        <div class="step-item">
-          <span class="step-num">STEP 01</span>
-          <h4>下载并放入独立文件夹</h4>
-          <p>下载上方 <code>FocusCamera-Windows-x64.exe</code>，建议放在固定目录（如 <code>D:\FocusCamera\</code>），双击即可直接启动。</p>
-        </div>
-        <div class="step-item">
-          <span class="step-num">STEP 02</span>
-          <h4>一键扫描局域网摄像头</h4>
-          <p>进入顶部「设备管理」标签页，输入摄像头登录密码后点击「扫描局域网」，系统将自动识别所有琴房名称并批量入库。</p>
-        </div>
-        <div class="step-item">
-          <span class="step-num">STEP 03</span>
-          <h4>后续版本一键在线升级</h4>
-          <p>以后每当发布新版本，客户端顶部状态栏会自动亮起「发现新版本」提示，点击即可在软件内一键完成安全升级。</p>
         </div>
       </div>
     </section>
@@ -431,7 +302,7 @@
 
   <footer>
     <div class="container">
-      FocusCamera 监控与对讲系统 · 托管于 <a href="https://github.com/focus0802/focus-camera" target="_blank" rel="noopener">GitHub Releases</a>
+      FocusCamera · <a href="https://github.com/focus0802/focus-camera" target="_blank" rel="noopener">GitHub Releases</a>
     </div>
   </footer>
 

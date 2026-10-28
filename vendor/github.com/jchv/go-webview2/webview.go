@@ -231,7 +231,7 @@ func (w *webview) callbinding(d rpcMessage) (interface{}, error) {
 }
 
 func wndproc(hwnd, msg, wp, lp uintptr) uintptr {
-	if msg == w32.WMNCCalcSize && wp != 0 {
+	if msg == w32.WMNCCalcSize && lp != 0 {
 		rgrc := (*w32.Rect)(unsafe.Pointer(lp))
 		origTop := rgrc.Top
 		r, _, _ := w32.User32DefWindowProcW.Call(hwnd, msg, wp, lp)
@@ -251,6 +251,28 @@ func wndproc(hwnd, msg, wp, lp uintptr) uintptr {
 			_ = w.browser.NotifyParentWindowPositionChanged()
 		case w32.WMNCLButtonDown:
 			_, _, _ = w32.User32SetFocus.Call(w.hwnd)
+			r, _, _ := w32.User32DefWindowProcW.Call(hwnd, msg, wp, lp)
+			return r
+		case 0x0084 /* WM_NCHITTEST */:
+			r, _, _ := w32.User32DefWindowProcW.Call(hwnd, msg, wp, lp)
+			if r >= 10 && r <= 17 /* HTLEFT..HTBOTTOMRIGHT */ {
+				return 1 /* HTCLIENT */
+			}
+			return r
+		case 0x0112 /* WM_SYSCOMMAND */:
+			cmd := wp & 0xFFF0
+			if cmd == 0xF000 /* SC_SIZE */ || cmd == 0xF010 /* SC_MOVE */ {
+				return 0
+			}
+			if cmd == 0xF120 /* SC_RESTORE */ {
+				zoomed, _, _ := w32.User32IsZoomed.Call(hwnd)
+				if zoomed != 0 {
+					return 0
+				}
+				r, _, _ := w32.User32DefWindowProcW.Call(hwnd, msg, wp, lp)
+				_, _, _ = w32.User32ShowWindow.Call(hwnd, w32.SWMaximize)
+				return r
+			}
 			r, _, _ := w32.User32DefWindowProcW.Call(hwnd, msg, wp, lp)
 			return r
 		case w32.WMSize:
@@ -354,9 +376,13 @@ func (w *webview) CreateWithOptions(opts WindowOptions) bool {
 		// get screen size
 		screenWidth, _, _ := w32.User32GetSystemMetrics.Call(w32.SM_CXSCREEN)
 		screenHeight, _, _ := w32.User32GetSystemMetrics.Call(w32.SM_CYSCREEN)
-		// calculate window position
-		posX = (uint(screenWidth) - windowWidth) / 2
-		posY = (uint(screenHeight) - windowHeight) / 2
+		// calculate window position without unsigned underflow
+		if uint(screenWidth) > windowWidth {
+			posX = (uint(screenWidth) - windowWidth) / 2
+		}
+		if uint(screenHeight) > windowHeight {
+			posY = (uint(screenHeight) - windowHeight) / 2
+		}
 	} else {
 		// use default position
 		posX = w32.CW_USEDEFAULT
@@ -382,9 +408,13 @@ func (w *webview) CreateWithOptions(opts WindowOptions) bool {
 		_, _, _ = w32.User32SendMessageW.Call(w.hwnd, w32.WMSetIcon, 1 /* ICON_BIG */, w.icon)
 		_, _, _ = w32.User32SendMessageW.Call(w.hwnd, w32.WMSetIcon, 0 /* ICON_SMALL */, w.icon)
 	}
+	_, _, _ = w32.User32SetWindowPos.Call(
+		w.hwnd, 0, uintptr(posX), uintptr(posY), uintptr(windowWidth), uintptr(windowHeight),
+		w32.SWPNoZOrder|w32.SWPNoActivate|w32.SWPFrameChanged,
+	)
 	w.initTrayIcon()
 
-	_, _, _ = w32.User32ShowWindow.Call(w.hwnd, w32.SWShow)
+	_, _, _ = w32.User32ShowWindow.Call(w.hwnd, w32.SWMaximize)
 	_, _, _ = w32.User32UpdateWindow.Call(w.hwnd)
 	_, _, _ = w32.User32SetFocus.Call(w.hwnd)
 
@@ -472,14 +502,8 @@ func (w *webview) SetSize(width int, height int, hints Hint) {
 		w.minsz.X = int32(width)
 		w.minsz.Y = int32(height)
 	} else {
-		r := w32.Rect{}
-		r.Left = 0
-		r.Top = 0
-		r.Right = int32(width)
-		r.Bottom = int32(height)
-		_, _, _ = w32.User32AdjustWindowRect.Call(uintptr(unsafe.Pointer(&r)), w32.WSOverlappedWindow, 0)
 		_, _, _ = w32.User32SetWindowPos.Call(
-			w.hwnd, 0, uintptr(r.Left), uintptr(r.Top), uintptr(r.Right-r.Left), uintptr(r.Bottom-r.Top),
+			w.hwnd, 0, 0, 0, uintptr(width), uintptr(height),
 			w32.SWPNoZOrder|w32.SWPNoActivate|w32.SWPNoMove|w32.SWPFrameChanged)
 		w.browser.Resize()
 	}
@@ -585,11 +609,7 @@ func (w *webview) RestoreFromTray() {
 	if w.hwnd == 0 {
 		return
 	}
-	_, _, _ = w32.User32ShowWindow.Call(w.hwnd, w32.SWShow)
-	zoomed, _, _ := w32.User32IsZoomed.Call(w.hwnd)
-	if zoomed == 0 {
-		_, _, _ = w32.User32ShowWindow.Call(w.hwnd, w32.SWRestore)
-	}
+	_, _, _ = w32.User32ShowWindow.Call(w.hwnd, w32.SWMaximize)
 	_, _, _ = w32.User32SetForegroundWindow.Call(w.hwnd)
 	_, _, _ = w32.User32SetFocus.Call(w.hwnd)
 	w.browser.Resize()

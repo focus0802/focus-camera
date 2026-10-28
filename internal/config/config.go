@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -144,12 +145,21 @@ type RecordingConfig struct {
 }
 
 type AppConfig struct {
-	DefaultUsername string          `json:"default_username"`
-	DefaultPassword string          `json:"default_password"`
-	SubnetPrefix    string          `json:"subnet_prefix"`
-	UpdateURL       string          `json:"update_url"`
-	Recording       RecordingConfig `json:"recording"`
-	Cameras         []Camera        `json:"cameras"`
+	DefaultUsername  string          `json:"default_username"`
+	DefaultPassword  string          `json:"default_password"`
+	SubnetPrefix     string          `json:"subnet_prefix"`
+	UpdateURL        string          `json:"update_url"`
+	AutoStartEnabled bool            `json:"auto_start_enabled"`
+	AutoStartMode    string          `json:"auto_start_mode"`
+	Recording        RecordingConfig `json:"recording"`
+	Cameras          []Camera        `json:"cameras"`
+}
+
+func NormalizeAutoStartMode(mode string) string {
+	if strings.ToLower(strings.TrimSpace(mode)) == "tray" {
+		return "tray"
+	}
+	return "window"
 }
 
 type Store struct {
@@ -190,6 +200,13 @@ func DefaultCameras() []Camera {
 
 func DefaultRecordingConfig(baseDir string) RecordingConfig {
 	recDir := filepath.Join(baseDir, "recordings")
+	if runtime.GOOS == "windows" && strings.HasPrefix(strings.TrimSpace(baseDir), `\\`) {
+		sysDrive := strings.TrimSpace(os.Getenv("SystemDrive"))
+		if sysDrive == "" {
+			sysDrive = "C:"
+		}
+		recDir = filepath.Join(sysDrive+`\`, "FocusCamera", "recordings")
+	}
 	return RecordingConfig{
 		StorageDir:        recDir,
 		SegmentMinutes:    15,
@@ -202,8 +219,17 @@ func DefaultRecordingConfig(baseDir string) RecordingConfig {
 }
 
 func normalizeRecordingConfig(rc *RecordingConfig, baseDir string) {
-	if strings.TrimSpace(rc.StorageDir) == "" {
-		rc.StorageDir = filepath.Join(baseDir, "recordings")
+	rawDir := strings.TrimSpace(rc.StorageDir)
+	if rawDir == "" || (runtime.GOOS == "windows" && strings.HasPrefix(strings.ToLower(rawDir), `\\mac\`)) {
+		if runtime.GOOS == "windows" && (strings.HasPrefix(strings.TrimSpace(baseDir), `\\`) || strings.HasPrefix(strings.ToLower(rawDir), `\\mac\`)) {
+			sysDrive := strings.TrimSpace(os.Getenv("SystemDrive"))
+			if sysDrive == "" {
+				sysDrive = "C:"
+			}
+			rc.StorageDir = filepath.Join(sysDrive+`\`, "FocusCamera", "recordings")
+		} else {
+			rc.StorageDir = filepath.Join(baseDir, "recordings")
+		}
 	}
 	if rc.SegmentMinutes < 1 || rc.SegmentMinutes > 120 {
 		rc.SegmentMinutes = 15
@@ -211,7 +237,7 @@ func normalizeRecordingConfig(rc *RecordingConfig, baseDir string) {
 	if rc.RetentionDays < 1 || rc.RetentionDays > 365 {
 		rc.RetentionDays = 7
 	}
-	if rc.MaxStorageGB < 5 {
+	if rc.MaxStorageGB < 1 {
 		rc.MaxStorageGB = 500
 	}
 	if rc.ScheduleStartTime == "" {
@@ -236,11 +262,13 @@ func NewStore(filePath string) (*Store, error) {
 	baseDir := filepath.Dir(filePath)
 	if err := s.load(); err != nil {
 		s.cfg = AppConfig{
-			DefaultUsername: "admin",
-			DefaultPassword: "",
-			SubnetPrefix:    "192.168.1",
-			Recording:       DefaultRecordingConfig(baseDir),
-			Cameras:         DefaultCameras(),
+			DefaultUsername:  "admin",
+			DefaultPassword:  "",
+			SubnetPrefix:     "192.168.1",
+			AutoStartEnabled: false,
+			AutoStartMode:    "window",
+			Recording:        DefaultRecordingConfig(baseDir),
+			Cameras:          DefaultCameras(),
 		}
 		_ = s.save()
 	}
@@ -262,6 +290,7 @@ func (s *Store) load() error {
 	if cfg.SubnetPrefix == "" {
 		cfg.SubnetPrefix = "192.168.1"
 	}
+	cfg.AutoStartMode = NormalizeAutoStartMode(cfg.AutoStartMode)
 	normalizeRecordingConfig(&cfg.Recording, filepath.Dir(s.filePath))
 	if cfg.Cameras == nil {
 		cfg.Cameras = []Camera{}
@@ -599,6 +628,20 @@ func (s *Store) SetUpdateURL(updateURL string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cfg.UpdateURL = strings.TrimSpace(updateURL)
+	return s.save()
+}
+
+func (s *Store) GetAutoStart() (enabled bool, mode string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cfg.AutoStartEnabled, NormalizeAutoStartMode(s.cfg.AutoStartMode)
+}
+
+func (s *Store) SetAutoStart(enabled bool, mode string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cfg.AutoStartEnabled = enabled
+	s.cfg.AutoStartMode = NormalizeAutoStartMode(mode)
 	return s.save()
 }
 

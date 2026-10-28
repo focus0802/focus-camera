@@ -10,7 +10,7 @@ package main
 #import <WebKit/WebKit.h>
 #include <stdlib.h>
 
-static NSImage* createFocusCameraIcon(void) {
+static NSImage* createFocusCameraIcon(BOOL fullBleed) {
 	NSSize size = NSMakeSize(256, 256);
 	NSImage *image = [[NSImage alloc] initWithSize:size];
 	[image lockFocus];
@@ -18,44 +18,54 @@ static NSImage* createFocusCameraIcon(void) {
 	NSGraphicsContext *ctx = [NSGraphicsContext currentContext];
 	[ctx setShouldAntialias:YES];
 
+	CGFloat inset = fullBleed ? 6.0 : 18.0;
+	CGFloat side = 256.0 - inset * 2.0;
+	CGFloat radius = side * 0.235;
+
 	// Rounded squircle studio background
-	NSRect bgRect = NSMakeRect(16, 16, 224, 224);
-	NSBezierPath *bgPath = [NSBezierPath bezierPathWithRoundedRect:bgRect xRadius:52 yRadius:52];
-	NSGradient *bgGrad = [[NSGradient alloc] initWithStartingColor:[NSColor colorWithSRGBRed:0.08 green:0.11 blue:0.17 alpha:1.0]
-	                                                   endingColor:[NSColor colorWithSRGBRed:0.04 green:0.05 blue:0.08 alpha:1.0]];
+	NSRect bgRect = NSMakeRect(inset, inset, side, side);
+	NSBezierPath *bgPath = [NSBezierPath bezierPathWithRoundedRect:bgRect xRadius:radius yRadius:radius];
+	NSGradient *bgGrad = [[NSGradient alloc] initWithStartingColor:[NSColor colorWithSRGBRed:0.21 green:0.25 blue:0.34 alpha:1.0]
+	                                                   endingColor:[NSColor colorWithSRGBRed:0.06 green:0.08 blue:0.11 alpha:1.0]];
 	[bgGrad drawInBezierPath:bgPath angle:-90.0];
 
-	// Subtle outer border
-	[[NSColor colorWithSRGBRed:0.22 green:0.32 blue:0.48 alpha:0.55] setStroke];
-	[bgPath setLineWidth:3.0];
+	// Crisp metallic outer border
+	[[NSColor colorWithSRGBRed:0.54 green:0.72 blue:0.90 alpha:0.52] setStroke];
+	[bgPath setLineWidth:4.5];
 	[bgPath stroke];
 
-	// Outer camera lens ring
-	NSRect outerRing = NSMakeRect(60, 60, 136, 136);
+	// Enlarged outer camera lens ring (~72% of body)
+	CGFloat outerD = side * 0.73;
+	CGFloat outerXY = (256.0 - outerD) * 0.5;
+	NSRect outerRing = NSMakeRect(outerXY, outerXY, outerD, outerD);
 	NSBezierPath *outerPath = [NSBezierPath bezierPathWithOvalInRect:outerRing];
 	[[NSColor colorWithSRGBRed:0.12 green:0.17 blue:0.26 alpha:1.0] setFill];
 	[outerPath fill];
-	[[NSColor colorWithSRGBRed:0.24 green:0.55 blue:0.96 alpha:0.9] setStroke];
-	[outerPath setLineWidth:6.0];
+	[[NSColor colorWithSRGBRed:0.32 green:0.64 blue:0.98 alpha:0.92] setStroke];
+	[outerPath setLineWidth:7.0];
 	[outerPath stroke];
 
-	// Inner glass iris
-	NSRect innerRing = NSMakeRect(86, 86, 84, 84);
+	// Enlarged inner glass iris
+	CGFloat innerD = side * 0.54;
+	CGFloat innerXY = (256.0 - innerD) * 0.5;
+	NSRect innerRing = NSMakeRect(innerXY, innerXY, innerD, innerD);
 	NSBezierPath *innerPath = [NSBezierPath bezierPathWithOvalInRect:innerRing];
-	NSGradient *lensGrad = [[NSGradient alloc] initWithStartingColor:[NSColor colorWithSRGBRed:0.18 green:0.46 blue:0.88 alpha:1.0]
-	                                                     endingColor:[NSColor colorWithSRGBRed:0.06 green:0.14 blue:0.30 alpha:1.0]];
+	NSGradient *lensGrad = [[NSGradient alloc] initWithStartingColor:[NSColor colorWithSRGBRed:0.20 green:0.52 blue:0.96 alpha:1.0]
+	                                                     endingColor:[NSColor colorWithSRGBRed:0.06 green:0.15 blue:0.34 alpha:1.0]];
 	[lensGrad drawInBezierPath:innerPath angle:-45.0];
 
 	// Lens specular highlight
-	NSRect glintRect = NSMakeRect(102, 134, 24, 24);
+	NSRect glintRect = NSMakeRect(128.0 - innerD * 0.28, 128.0 + innerD * 0.08, innerD * 0.28, innerD * 0.28);
 	NSBezierPath *glintPath = [NSBezierPath bezierPathWithOvalInRect:glintRect];
-	[[NSColor colorWithSRGBRed:1.0 green:1.0 blue:1.0 alpha:0.38] setFill];
+	[[NSColor colorWithSRGBRed:1.0 green:1.0 blue:1.0 alpha:0.46] setFill];
 	[glintPath fill];
 
 	// Live REC indicator dot in top-right corner
-	NSRect recDot = NSMakeRect(190, 190, 22, 22);
+	CGFloat recR = side * 0.095;
+	CGFloat recCenter = 256.0 - inset - side * 0.175;
+	NSRect recDot = NSMakeRect(recCenter - recR * 0.5, recCenter - recR * 0.5, recR, recR);
 	NSBezierPath *recPath = [NSBezierPath bezierPathWithOvalInRect:recDot];
-	[[NSColor colorWithSRGBRed:0.95 green:0.24 blue:0.28 alpha:1.0] setFill];
+	[[NSColor colorWithSRGBRed:1.0 green:0.23 blue:0.19 alpha:1.0] setFill];
 	[recPath fill];
 
 	[image unlockFocus];
@@ -103,7 +113,8 @@ static NSImage* createFocusCameraIcon(void) {
 	CGFloat y = round((barHeight - btnHeight) / 2.0);
 	[closeBtn setFrameOrigin:NSMakePoint(18.0, y)];
 	[miniBtn setFrameOrigin:NSMakePoint(38.0, y)];
-	[zoomBtn setFrameOrigin:NSMakePoint(58.0, y)];
+	[zoomBtn setHidden:YES];
+	[zoomBtn setEnabled:NO];
 }
 
 @end
@@ -131,6 +142,7 @@ static NSImage* createFocusCameraIcon(void) {
 @property (nonatomic, strong) NSStatusItem *statusItem;
 @property (nonatomic, copy) NSString *initialURL;
 @property (nonatomic, assign) BOOL forceClose;
+@property (nonatomic, assign) BOOL startInTray;
 @end
 
 @implementation FocusAppDelegate
@@ -214,10 +226,15 @@ static NSImage* createFocusCameraIcon(void) {
 
 - (void)setupStatusBarTray:(NSImage *)appIcon {
 	self.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSSquareStatusItemLength];
-	if (self.statusItem.button && appIcon) {
-		NSImage *trayIcon = [appIcon copy];
-		[trayIcon setSize:NSMakeSize(18, 18)];
-		[self.statusItem.button setImage:trayIcon];
+	if (self.statusItem.button) {
+		NSImage *trayIcon = createFocusCameraIcon(YES);
+		if (!trayIcon && appIcon) {
+			trayIcon = [appIcon copy];
+		}
+		if (trayIcon) {
+			[trayIcon setSize:NSMakeSize(19, 19)];
+			[self.statusItem.button setImage:trayIcon];
+		}
 		[self.statusItem.button setToolTip:@"FocusCamera · 高清监控与 NVR 中心（后台运行中）"];
 	}
 	NSMenu *trayMenu = [[NSMenu alloc] initWithTitle:@"FocusCamera"];
@@ -240,7 +257,7 @@ static NSImage* createFocusCameraIcon(void) {
 
 	NSImage *icon = [NSImage imageNamed:@"AppIcon"];
 	if (!icon) {
-		icon = createFocusCameraIcon();
+		icon = createFocusCameraIcon(NO);
 	}
 	if (icon) {
 		[NSApp setApplicationIconImage:icon];
@@ -249,27 +266,25 @@ static NSImage* createFocusCameraIcon(void) {
 
 	NSScreen *screen = [NSScreen mainScreen];
 	NSRect visible = screen ? [screen visibleFrame] : NSMakeRect(0, 0, 1680, 980);
-	CGFloat width = MIN(1680.0, visible.size.width * 0.95);
-	CGFloat height = MIN(1000.0, visible.size.height * 0.93);
-	CGFloat x = visible.origin.x + (visible.size.width - width) / 2.0;
-	CGFloat y = visible.origin.y + (visible.size.height - height) / 2.0;
 
 	NSWindowStyleMask style = NSWindowStyleMaskTitled |
 	                          NSWindowStyleMaskClosable |
 	                          NSWindowStyleMaskMiniaturizable |
-	                          NSWindowStyleMaskResizable |
 	                          NSWindowStyleMaskFullSizeContentView;
 
-	self.window = [[FocusWindow alloc] initWithContentRect:NSMakeRect(x, y, width, height)
+	self.window = [[FocusWindow alloc] initWithContentRect:visible
 	                                             styleMask:style
 	                                               backing:NSBackingStoreBuffered
 	                                                 defer:NO];
+	[self.window setFrame:visible display:YES];
 	[self.window setTitle:@"Focus Camera · 高清监控与 NVR 中心"];
 	[self.window setTitleVisibility:NSWindowTitleHidden];
 	[self.window setTitlebarAppearsTransparent:YES];
+	[self.window setMovable:NO];
 	[self.window setMovableByWindowBackground:NO];
-	[self.window setMinSize:NSMakeSize(1100, 700)];
-	[self.window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenPrimary];
+	[self.window setMinSize:visible.size];
+	[self.window setMaxSize:visible.size];
+	[[self.window standardWindowButton:NSWindowZoomButton] setEnabled:NO];
 	[self.window setAppearance:[NSAppearance appearanceNamed:NSAppearanceNameDarkAqua]];
 	[self.window setBackgroundColor:[NSColor colorWithSRGBRed:0.086 green:0.086 blue:0.086 alpha:1.0]];
 	[self.window setDelegate:self];
@@ -303,9 +318,13 @@ static NSImage* createFocusCameraIcon(void) {
 		[self.webView loadRequest:req];
 	}
 
-	[self.window makeKeyAndOrderFront:nil];
-	[self.window syncTrafficLights];
-	[NSApp activateIgnoringOtherApps:YES];
+	if (self.startInTray) {
+		[self.window orderOut:nil];
+	} else {
+		[self.window makeKeyAndOrderFront:nil];
+		[self.window syncTrafficLights];
+		[NSApp activateIgnoringOtherApps:YES];
+	}
 }
 
 - (void)userContentController:(WKUserContentController *)userContentController
@@ -515,24 +534,95 @@ decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
 
 @end
 
-static void runCocoaDesktopWindow(const char *cUrl) {
+static void runCocoaDesktopWindow(const char *cUrl, int startInTray) {
 	@autoreleasepool {
 		NSApplication *app = [NSApplication sharedApplication];
 		[app setActivationPolicy:NSApplicationActivationPolicyRegular];
 
 		FocusAppDelegate *delegate = [[FocusAppDelegate alloc] init];
 		delegate.initialURL = [NSString stringWithUTF8String:cUrl];
+		delegate.startInTray = (startInTray != 0);
 		[app setDelegate:delegate];
 
 		[app run];
 	}
 }
+
+static char* selectMacOSFolderDialog(const char *cInitialDir) {
+	__block NSString *selectedPath = nil;
+	void (^runPanel)(void) = ^{
+		NSOpenPanel *panel = [NSOpenPanel openPanel];
+		[panel setTitle:@"选择 1080P 录像存储文件夹"];
+		[panel setMessage:@"请选择用于保存 1080P 监控录像分片 (MP4) 的本地磁盘文件夹："];
+		[panel setPrompt:@"选择此文件夹"];
+		[panel setCanChooseFiles:NO];
+		[panel setCanChooseDirectories:YES];
+		[panel setCanCreateDirectories:YES];
+		[panel setAllowsMultipleSelection:NO];
+		if (cInitialDir != NULL && strlen(cInitialDir) > 0) {
+			NSString *dirStr = [NSString stringWithUTF8String:cInitialDir];
+			BOOL isDir = NO;
+			if (dirStr && [[NSFileManager defaultManager] fileExistsAtPath:dirStr isDirectory:&isDir] && isDir) {
+				[panel setDirectoryURL:[NSURL fileURLWithPath:dirStr isDirectory:YES]];
+			}
+		}
+		[NSApp activateIgnoringOtherApps:YES];
+		NSModalResponse resp = [panel runModal];
+		if (resp == NSModalResponseOK && [[panel URLs] count] > 0) {
+			NSURL *url = [[panel URLs] firstObject];
+			selectedPath = [url path];
+		}
+	};
+	if ([NSThread isMainThread]) {
+		runPanel();
+	} else {
+		dispatch_sync(dispatch_get_main_queue(), runPanel);
+	}
+	if (selectedPath != nil && [selectedPath length] > 0) {
+		return strdup([selectedPath UTF8String]);
+	}
+	return NULL;
+}
 */
 import "C"
-import "unsafe"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"unsafe"
+)
 
-func runNativeDesktopWindow(appURL string) {
+func runNativeDesktopWindow(appURL string, startInTray bool) {
 	cStr := C.CString(appURL)
 	defer C.free(unsafe.Pointer(cStr))
-	C.runCocoaDesktopWindow(cStr)
+	trayFlag := C.int(0)
+	if startInTray {
+		trayFlag = C.int(1)
+	}
+	C.runCocoaDesktopWindow(cStr, trayFlag)
+}
+
+func selectNativeStorageFolder(initialDir string) (string, bool, error) {
+	cleanInit := strings.TrimSpace(initialDir)
+	if cleanInit != "" {
+		if abs, err := filepath.Abs(cleanInit); err == nil {
+			cleanInit = abs
+		}
+		if st, err := os.Stat(cleanInit); err != nil || !st.IsDir() {
+			cleanInit = ""
+		}
+	}
+	cInit := C.CString(cleanInit)
+	defer C.free(unsafe.Pointer(cInit))
+
+	cSelected := C.selectMacOSFolderDialog(cInit)
+	if cSelected == nil {
+		return "", true, nil
+	}
+	defer C.free(unsafe.Pointer(cSelected))
+	selected := strings.TrimSpace(C.GoString(cSelected))
+	if selected == "" {
+		return "", true, nil
+	}
+	return selected, false, nil
 }

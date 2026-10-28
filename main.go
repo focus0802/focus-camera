@@ -24,6 +24,7 @@ import (
 	"syscall"
 	"time"
 
+	"focus-camera/internal/autostart"
 	"focus-camera/internal/config"
 	"focus-camera/internal/discovery"
 	"focus-camera/internal/ptz"
@@ -272,6 +273,7 @@ func (w *rotatingLogWriter) openOrRotate() {
 }
 
 func (w *rotatingLogWriter) Write(p []byte) (int, error) {
+	_, _ = os.Stderr.Write(p)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.f == nil {
@@ -293,6 +295,7 @@ func main() {
 	portFlag := flag.Int("port", 19820, "Local HTTP/WebSocket port")
 	serverOnly := flag.Bool("server-only", false, "Run server without launching desktop app window")
 	configPath := flag.String("config", "", "Path to cameras.json config file")
+	autoStartFlag := flag.Bool("autostart", false, "Launched by OS login/boot auto-start")
 	flag.Parse()
 
 	cfgFile := *configPath
@@ -303,11 +306,18 @@ func main() {
 	logPath := filepath.Join(filepath.Dir(cfgFile), "focus-camera.log")
 	rotLog := newRotatingLogWriter(logPath, 10*1024*1024) // 10 MB per log file
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	log.SetOutput(io.MultiWriter(os.Stderr, rotLog))
+	log.SetOutput(rotLog)
 
 	store, err := config.NewStore(cfgFile)
 	if err != nil {
 		log.Fatalf("初始化配置失败: %v", err)
+	}
+	if autoEnabled, autoMode := store.GetAutoStart(); autoEnabled {
+		if healed, err := autostart.SyncOnStartup(autoEnabled, autoMode); err != nil {
+			log.Printf("[AutoStart] 启动时同步开机自启路径失败: %v", err)
+		} else if healed {
+			log.Printf("[AutoStart] 检测到程序位置变更，已自动修正开机自启注册路径。")
+		}
 	}
 	hub := rtsp.NewStreamHub(store)
 	recMgr := recorder.NewManager(store, hub)
@@ -647,6 +657,55 @@ func main() {
 			"config":        store.GetConfig(),
 			"record_status": recMgr.GetStatus(),
 		})
+	})
+
+	// 1e. API: Query & Configure OS Auto-Start on Boot/Login
+	mux.HandleFunc("/api/autostart", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		switch r.Method {
+		case http.MethodGet:
+			enabled, mode := store.GetAutoStart()
+			st := autostart.GetStatus(enabled, mode)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok":     true,
+				"status": st,
+			})
+		case http.MethodPost, http.MethodPut:
+			var req struct {
+				Enabled bool   `json:"enabled"`
+				Mode    string `json:"mode"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			normMode := config.NormalizeAutoStartMode(req.Mode)
+			st, err := autostart.Apply(req.Enabled, normMode)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"ok":     false,
+					"error":  err.Error(),
+					"status": st,
+				})
+				return
+			}
+			if err := store.SetAutoStart(req.Enabled, normMode); err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"ok":     false,
+					"error":  err.Error(),
+					"status": st,
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok":     true,
+				"status": autostart.GetStatus(req.Enabled, normMode),
+			})
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
 	})
 
 	// 2. API: Scan LAN and return discovered cameras for interactive preview/selection
@@ -1394,11 +1453,18 @@ func main() {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		rc := store.GetConfig().Recording
-		_ = os.MkdirAll(rc.StorageDir, 0o755)
-		absDir, err := filepath.Abs(rc.StorageDir)
+		var req struct {
+			Path string `json:"path"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		targetDir := strings.TrimSpace(req.Path)
+		if targetDir == "" {
+			targetDir = store.GetConfig().Recording.StorageDir
+		}
+		_ = os.MkdirAll(targetDir, 0o755)
+		absDir, err := filepath.Abs(targetDir)
 		if err != nil {
-			absDir = rc.StorageDir
+			absDir = targetDir
 		}
 		switch runtime.GOOS {
 		case "windows":
@@ -1409,6 +1475,53 @@ func main() {
 			_ = exec.Command("xdg-open", absDir).Start()
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "path": absDir})
+	})
+
+	mux.HandleFunc("/api/recordings/select-folder", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		var req struct {
+			CurrentDir string `json:"current_dir"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		initialDir := strings.TrimSpace(req.CurrentDir)
+		if initialDir == "" {
+			initialDir = store.GetConfig().Recording.StorageDir
+		}
+		selectedPath, cancelled, err := selectNativeStorageFolder(initialDir)
+		if err != nil {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok":    false,
+				"error": err.Error(),
+			})
+			return
+		}
+		var diskInfo any
+		if !cancelled && selectedPath != "" {
+			diskInfo = recorder.InspectDiskSpace(selectedPath)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":        true,
+			"cancelled": cancelled,
+			"path":      selectedPath,
+			"disk":      diskInfo,
+		})
+	})
+
+	mux.HandleFunc("/api/recordings/disk-info", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		targetDir := strings.TrimSpace(r.URL.Query().Get("path"))
+		if targetDir == "" {
+			targetDir = store.GetConfig().Recording.StorageDir
+		}
+		info := recorder.InspectDiskSpace(targetDir)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":   true,
+			"disk": info,
+		})
 	})
 
 	// 5. WebSocket: Video + Audio Live Stream (/ws/stream?id=...&stream=sub|main&audio=0|1)
@@ -1638,7 +1751,13 @@ func main() {
 		select {}
 	}
 
-	runNativeDesktopWindow(fmt.Sprintf("%s/?_v=%d", actualURL, time.Now().UnixMilli()))
+	_, autoMode := store.GetAutoStart()
+	startInTray := *autoStartFlag && autoMode == "tray"
+	if startInTray {
+		log.Printf("[AutoStart] 开机自启模式为静默托盘运行，主窗口将收起至系统托盘。")
+	}
+
+	runNativeDesktopWindow(fmt.Sprintf("%s/?_v=%d", actualURL, time.Now().UnixMilli()), startInTray)
 	log.Printf("桌面窗口已关闭，正在安全刷盘并关闭所有 1080P 录像分片...")
 	recMgr.StopAll()
 	log.Printf("所有录像分片已安全落盘，程序退出。")

@@ -171,3 +171,18 @@ export interface UpdateStatus {
   message?: string;
   error?: string;
 }
+
+export type AutoStartMode = "window" | "tray";
+
+export interface AutoStartStatus {
+  supported: boolean;
+  enabled: boolean;
+  os_registered: boolean;
+  mode: AutoStartMode;
+  executable_path: string;
+  registered_cmd?: string;
+  is_network_path?: boolean;
+  warning?: string;
+}
+
+export type SystemSettingsTab = "general" | "recording" | "update";

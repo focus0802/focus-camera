@@ -58,6 +58,7 @@ export function DatePicker({ label, value, onChange, description, placeholder = 
   const [previousTime, setPreviousTime] = useState(time);
   const [direction, setDirection] = useState(1);
   if (previousTime !== time) { setPreviousTime(time); setDirection(time === null || previousTime === null || time >= previousTime ? 1 : -1); }
+  const isZh = locale.toLowerCase().startsWith("zh");
   const shown = value ? formatter.format(value) : placeholder;
   const parts = value ? formatter.formatToParts(value) : [];
   // Parts after a wider or narrower segment move on the same curve the new text arrives on, so they never overlap it.
@@ -122,7 +123,7 @@ export function DatePicker({ label, value, onChange, description, placeholder = 
           animate={{ opacity: 1, y: 0, scale: 1, transition: reduce ? instant : { ...spring.snappy, opacity: { duration: duration.fast, ease: ease.enter } } }}
           exit={{ opacity: 0, ...(reduce ? {} : { y: -6, scale: .97 }), transition: { duration: 0.14, ease: ease.standard } }}>
           <Calendar value={value} onChange={selectDate} month={month} onMonthChange={setMonth} minDate={minDate} maxDate={maxDate} disabledDates={disabledDates} locale={locale} showToday={showToday} />
-          <div className={styles.footer}><button type="button" onClick={() => selectDate(undefined)} disabled={!value}>Clear</button><span className={styles.status}><AnimatePresence initial={false}><motion.span key={time ?? "none"} variants={reduce ? valueFade : statusRise} initial="enter" animate="center" exit="exit">{value ? `Selected ${formatter.format(value)}` : "Choose a day"}</motion.span></AnimatePresence></span></div>
+          <div className={styles.footer}><button type="button" onClick={() => selectDate(undefined)} disabled={!value}>{isZh ? "清空" : "Clear"}</button><span className={styles.status}><AnimatePresence initial={false}><motion.span key={time ?? "none"} variants={reduce ? valueFade : statusRise} initial="enter" animate="center" exit="exit">{value ? (isZh ? `已选 ${formatter.format(value)}` : `Selected ${formatter.format(value)}`) : (isZh ? "请选择日期" : "Choose a day")}</motion.span></AnimatePresence></span></div>
         </motion.div>}
       </AnimatePresence>
     </div>
