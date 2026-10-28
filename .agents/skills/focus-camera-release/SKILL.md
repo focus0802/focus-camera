@@ -16,9 +16,9 @@ Run TypeScript verification and Vite production build (which outputs directly in
 ```
 
 ## 2. Run Go Unit Tests
-Verify the self-updater and embedded asset tests pass before packaging:
+Verify the self-updater, autostart, and embedded asset tests pass before packaging (use `-ldflags="-linkmode=external"` on macOS so `LC_UUID` is always emitted on macOS 15.4+/26+):
 ```bash
-/opt/homebrew/bin/go test -mod=vendor -v ./internal/updater .
+/opt/homebrew/bin/go test -mod=vendor -ldflags="-linkmode=external" -v ./internal/updater ./internal/autostart .
 ```
 
 ## 3. Cross-Compile Desktop Executables (`dist/`)
@@ -41,6 +41,7 @@ Compute SHA-256 hashes and exact byte sizes for `dist/FocusCamera-Mac` and `dist
 ```
 Update `dist/version.json` with the new `version`, `published_at`, `notes`, and `assets` (`darwin_arm64` and `windows_amd64`).
 
-## 5. Publish to GitHub Releases
+## 5. Publish to GitHub Releases & Watch CI Pipeline
 1. Commit source changes (ensuring `dist/`, `cameras.json`, and `recordings/` remain ignored) and push `main` first.
-2. Create and push the version tag (`git tag v2.0.1 && git push origin v2.0.1`) so `.github/workflows/release.yml` triggers, or upload `dist/version.json`, `dist/FocusCamera-Windows-x64.exe`, `dist/FocusCamera-Windows-Console.exe`, and `dist/FocusCamera-Mac` to the GitHub Release for `v2.0.1`.
+2. Create and push the version tag (`git tag -f v2.3.0 && git push origin main --force-with-lease && git push origin -f v2.3.0`) so `.github/workflows/release.yml` triggers.
+3. **Mandatory CI Watch & Verification**: Never end the release task immediately after `git push`. You MUST watch the `.github/workflows/release.yml` run until it finishes (`status == "completed"` and `conclusion == "success"`), and verify the published release assets (`version.json`, `FocusCamera-Windows-x64.exe`, `FocusCamera-Windows-Console.exe`, `FocusCamera-Mac`) using the `github` MCP tool (`get_release_by_tag` / `get_latest_release`). If the workflow fails, inspect the step logs, fix the root cause, re-tag, and watch again until green.
