@@ -280,7 +280,7 @@ static NSImage* createFocusCameraIcon(BOOL fullBleed) {
 	[self.window setTitle:@"Focus Camera · 高清监控与 NVR 中心"];
 	[self.window setTitleVisibility:NSWindowTitleHidden];
 	[self.window setTitlebarAppearsTransparent:YES];
-	[self.window setMovable:NO];
+	[self.window setMovable:YES];
 	[self.window setMovableByWindowBackground:NO];
 	[self.window setMinSize:visible.size];
 	[self.window setMaxSize:visible.size];
@@ -336,11 +336,7 @@ static NSImage* createFocusCameraIcon(BOOL fullBleed) {
 	if ([action isEqualToString:@"drag"]) {
 		NSEvent *ev = self.webView.lastMouseDownEvent ?: [NSApp currentEvent];
 		if (ev && self.window) {
-			if (ev.clickCount == 2) {
-				[self.window performZoom:nil];
-			} else {
-				[self.window performWindowDragWithEvent:ev];
-			}
+			[self.window performWindowDragWithEvent:ev];
 		}
 	} else if ([action isEqualToString:@"zoom"]) {
 		if (self.window) {

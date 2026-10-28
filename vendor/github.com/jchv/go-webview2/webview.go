@@ -261,17 +261,8 @@ func wndproc(hwnd, msg, wp, lp uintptr) uintptr {
 			return r
 		case 0x0112 /* WM_SYSCOMMAND */:
 			cmd := wp & 0xFFF0
-			if cmd == 0xF000 /* SC_SIZE */ || cmd == 0xF010 /* SC_MOVE */ {
+			if cmd == 0xF000 /* SC_SIZE */ || cmd == 0xF030 /* SC_MAXIMIZE */ {
 				return 0
-			}
-			if cmd == 0xF120 /* SC_RESTORE */ {
-				zoomed, _, _ := w32.User32IsZoomed.Call(hwnd)
-				if zoomed != 0 {
-					return 0
-				}
-				r, _, _ := w32.User32DefWindowProcW.Call(hwnd, msg, wp, lp)
-				_, _, _ = w32.User32ShowWindow.Call(hwnd, w32.SWMaximize)
-				return r
 			}
 			r, _, _ := w32.User32DefWindowProcW.Call(hwnd, msg, wp, lp)
 			return r
@@ -371,23 +362,39 @@ func (w *webview) CreateWithOptions(opts WindowOptions) bool {
 		windowHeight = 480
 	}
 
-	var posX, posY uint
-	if opts.Center {
-		// get screen size
+	var workRect w32.Rect
+	spiOk, _, _ := w32.User32SystemParametersInfoW.Call(
+		0x0030, // SPI_GETWORKAREA
+		0,
+		uintptr(unsafe.Pointer(&workRect)),
+		0,
+	)
+	frameX, _, _ := w32.User32GetSystemMetrics.Call(w32.SM_CXSIZEFRAME)
+	frameY, _, _ := w32.User32GetSystemMetrics.Call(w32.SM_CYSIZEFRAME)
+	pad, _, _ := w32.User32GetSystemMetrics.Call(w32.SM_CXPADDEDBORDER)
+	borderX := int32(frameX + pad)
+	borderY := int32(frameY + pad)
+
+	var posX, posY, winW, winH int32
+	if spiOk != 0 && workRect.Right > workRect.Left && workRect.Bottom > workRect.Top {
+		posX = workRect.Left - borderX
+		posY = workRect.Top
+		winW = (workRect.Right - workRect.Left) + borderX*2
+		winH = (workRect.Bottom - workRect.Top) + borderY
+	} else {
 		screenWidth, _, _ := w32.User32GetSystemMetrics.Call(w32.SM_CXSCREEN)
 		screenHeight, _, _ := w32.User32GetSystemMetrics.Call(w32.SM_CYSCREEN)
-		// calculate window position without unsigned underflow
-		if uint(screenWidth) > windowWidth {
-			posX = (uint(screenWidth) - windowWidth) / 2
+		winW = int32(windowWidth)
+		winH = int32(windowHeight)
+		if int32(screenWidth) > winW {
+			posX = (int32(screenWidth) - winW) / 2
 		}
-		if uint(screenHeight) > windowHeight {
-			posY = (uint(screenHeight) - windowHeight) / 2
+		if int32(screenHeight) > winH {
+			posY = (int32(screenHeight) - winH) / 2
 		}
-	} else {
-		// use default position
-		posX = w32.CW_USEDEFAULT
-		posY = w32.CW_USEDEFAULT
 	}
+	w.minsz = w32.Point{X: winW, Y: winH}
+	w.maxsz = w32.Point{X: winW, Y: winH}
 
 	w.hwnd, _, _ = w32.User32CreateWindowExW.Call(
 		0,
@@ -396,8 +403,8 @@ func (w *webview) CreateWithOptions(opts WindowOptions) bool {
 		0xCF0000, // WS_OVERLAPPEDWINDOW
 		uintptr(posX),
 		uintptr(posY),
-		uintptr(windowWidth),
-		uintptr(windowHeight),
+		uintptr(winW),
+		uintptr(winH),
 		0,
 		0,
 		uintptr(hinstance),
@@ -409,12 +416,12 @@ func (w *webview) CreateWithOptions(opts WindowOptions) bool {
 		_, _, _ = w32.User32SendMessageW.Call(w.hwnd, w32.WMSetIcon, 0 /* ICON_SMALL */, w.icon)
 	}
 	_, _, _ = w32.User32SetWindowPos.Call(
-		w.hwnd, 0, uintptr(posX), uintptr(posY), uintptr(windowWidth), uintptr(windowHeight),
+		w.hwnd, 0, uintptr(posX), uintptr(posY), uintptr(winW), uintptr(winH),
 		w32.SWPNoZOrder|w32.SWPNoActivate|w32.SWPFrameChanged,
 	)
 	w.initTrayIcon()
 
-	_, _, _ = w32.User32ShowWindow.Call(w.hwnd, w32.SWMaximize)
+	_, _, _ = w32.User32ShowWindow.Call(w.hwnd, w32.SWShow)
 	_, _, _ = w32.User32UpdateWindow.Call(w.hwnd)
 	_, _, _ = w32.User32SetFocus.Call(w.hwnd)
 
@@ -609,7 +616,8 @@ func (w *webview) RestoreFromTray() {
 	if w.hwnd == 0 {
 		return
 	}
-	_, _, _ = w32.User32ShowWindow.Call(w.hwnd, w32.SWMaximize)
+	_, _, _ = w32.User32ShowWindow.Call(w.hwnd, w32.SWShow)
+	_, _, _ = w32.User32ShowWindow.Call(w.hwnd, w32.SWRestore)
 	_, _, _ = w32.User32SetForegroundWindow.Call(w.hwnd)
 	_, _, _ = w32.User32SetFocus.Call(w.hwnd)
 	w.browser.Resize()

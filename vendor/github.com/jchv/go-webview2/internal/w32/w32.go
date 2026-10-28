@@ -58,11 +58,13 @@ var (
 	User32TrackPopupMenu           = user32.NewProc("TrackPopupMenu")
 	User32DestroyMenu              = user32.NewProc("DestroyMenu")
 	User32CreateIconFromResourceEx = user32.NewProc("CreateIconFromResourceEx")
+	User32SystemParametersInfoW    = user32.NewProc("SystemParametersInfoW")
 )
 
 const (
 	SM_CXSCREEN       = 0
 	SM_CYSCREEN       = 1
+	SM_CXSIZEFRAME    = 32
 	SM_CYSIZEFRAME    = 33
 	SM_CXPADDEDBORDER = 92
 )

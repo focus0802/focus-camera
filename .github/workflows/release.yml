@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release tag version (e.g. v2.3.0)"
+        description: "Release tag version (e.g. v2.3.1)"
         required: true
-        default: "v2.3.0"
+        default: "v2.3.1"
 
 permissions:
   contents: write
@@ -82,7 +82,7 @@ jobs:
           {
             "version": "${RELEASE_VERSION}",
             "published_at": "${PUB_DATE}",
-            "notes": "FocusCamera ${RELEASE_VERSION} 系统设置中心、开机静默自启与全平台满铺高清图标升级版：\n1. 全新系统设置中心：统一管理双平台开机自启（支持后台托盘静默录制）、录像存储路径原生文件夹选择、分片时长/循环覆盖策略与每日定时录制计划\n2. 全平台图标尺寸与视觉升级：Windows (.exe / 托盘) 与浏览器图标升级为 95.2% 满铺画布，软件顶栏品牌 Logo 放大至 28×28 px，macOS Dock 与顶部状态栏图标放大核心蓝宝石镜头并增强高光边缘\n3. Windows 纯原生 COM 加载器：移除内存 DLL 注入加载器，全面消除 Windows Defender 启发式误报\n4. 监控墙交互与细节打磨：优化顶栏紧凑单行布局、弹窗滚动与日期/时间选择器视觉一致性",
+            "notes": "FocusCamera ${RELEASE_VERSION} 桌面端顶栏自由拖动与工作区固定尺寸优化版：\n1. 恢复顶栏自由拖动窗口：保持窗口固定为桌面工作区尺寸（不可缩放/调整大小），同时支持按住顶部导航栏自由拖动窗口（适配多显示器移动场景）\n2. 沉浸式大屏模式与浮动控制抽屉：支持一键进入 100% 满屏沉浸监控墙模式、鼠标触顶呼出顶栏、快捷键快速切换宫格与全局命令面板 (⌘K / /)\n3. 系统设置中心与开机静默自启：统一管理双平台开机自启、录像存储目录原生选择、循环覆盖与定时录像策略",
             "assets": {
               "darwin_arm64": {
                 "url": "FocusCamera-Mac",

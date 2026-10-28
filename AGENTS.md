@@ -74,3 +74,4 @@
 ## 4. Native Desktop & Self-Updater Invariants
 - **Loopback Binding on Windows**: Keep the embedded HTTP server bound to `127.0.0.1` (starting at `:18080` with automatic port fallback) so Windows Defender Firewall does not block local WebView2 connections.
 - **Graceful Recording Flush Before Exit/Upgrade**: Any shutdown (`/api/shutdown`) or self-upgrade (`updMgr.StartUpgrade`) must invoke `recMgr.StopAll()` before process termination or binary replacement so active 1080P fMP4 segments are finalized cleanly on disk.
+- **Fixed-Size But Draggable Desktop Window**: Keep the desktop window fixed to the screen work area and non-resizable (`minSize == maxSize`, no `NSWindowStyleMaskResizable` on macOS, block `SC_SIZE`/`SC_MAXIMIZE` on Windows), while always preserving top-bar dragging (`onMouseDown={handleHeaderMouseDown}` -> `"drag"`, `[window setMovable:YES]` on macOS, `WM_NCLBUTTONDOWN` `HTCAPTION` + `SC_MOVE` on Windows).

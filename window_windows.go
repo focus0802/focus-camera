@@ -24,6 +24,8 @@ var (
 
 	user32               = windows.NewLazySystemDLL("user32.dll")
 	procShowWindow       = user32.NewProc("ShowWindow")
+	procPostMessageW     = user32.NewProc("PostMessageW")
+	procReleaseCapture   = user32.NewProc("ReleaseCapture")
 	procSendMessageW     = user32.NewProc("SendMessageW")
 	procGetDpiForSystem  = user32.NewProc("GetDpiForSystem")
 	procGetSystemMetrics = user32.NewProc("GetSystemMetrics")
@@ -254,9 +256,9 @@ func runNativeDesktopWindow(appURL string, startInTray bool) {
 			if startInTray {
 				w.MinimizeToTray()
 			} else {
-				_, _, _ = procShowWindow.Call(hwnd, 3 /* SW_MAXIMIZE */)
+				_, _, _ = procShowWindow.Call(hwnd, 5 /* SW_SHOW */)
 			}
-			w.Init("window.__FOCUS_PLATFORM__ = 'windows'; document.documentElement.dataset.windowMaximized = 'true';")
+			w.Init("window.__FOCUS_PLATFORM__ = 'windows';")
 			_ = w.Bind("focusSyncWindowTheme", func(theme string) {
 				w.Dispatch(func() {
 					applyWindowsImmersiveTheme(hwnd, theme != "light")
@@ -265,6 +267,9 @@ func runNativeDesktopWindow(appURL string, startInTray bool) {
 			_ = w.Bind("focusWindowControl", func(action string) {
 				w.Dispatch(func() {
 					switch action {
+					case "drag":
+						_, _, _ = procReleaseCapture.Call()
+						_, _, _ = procPostMessageW.Call(hwnd, 0x00A1 /* WM_NCLBUTTONDOWN */, 2 /* HTCAPTION */, 0)
 					case "minimize":
 						_, _, _ = procShowWindow.Call(hwnd, 6 /* SW_MINIMIZE */)
 					case "tray":

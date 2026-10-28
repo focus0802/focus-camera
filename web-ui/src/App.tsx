@@ -95,7 +95,7 @@ export function App() {
   }, []);
 
   const sendWindowsControl = useCallback(
-    (action: "minimize" | "tray" | "remove-tray" | "close") => {
+    (action: "drag" | "minimize" | "tray" | "remove-tray" | "close") => {
       if (window.chrome?.webview?.postMessage) {
         window.chrome.webview.postMessage(
           JSON.stringify({
@@ -115,6 +115,24 @@ export function App() {
       }
     },
     []
+  );
+
+  const handleHeaderMouseDown = useCallback(
+    (e: React.MouseEvent<HTMLElement>) => {
+      if (e.button !== 0) return;
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      if (
+        target.closest(
+          'button, a, input, select, textarea, [role="tab"], [role="button"], [role="switch"], [data-no-drag]'
+        )
+      ) {
+        return;
+      }
+      window.webkit?.messageHandlers?.focusWindow?.postMessage("drag");
+      sendWindowsControl("drag");
+    },
+    [sendWindowsControl]
   );
 
   useEffect(() => {
@@ -1025,6 +1043,7 @@ export function App() {
         className={`top-header ${
           isWallHeaderFloating ? "top-header--floating" : ""
         } ${!isWallHeaderVisible ? "top-header--hidden" : ""}`}
+        onMouseDown={handleHeaderMouseDown}
         onPointerEnter={revealHeader}
         onPointerLeave={scheduleHideHeader}
       >
@@ -1208,7 +1227,7 @@ export function App() {
             variant="ghost"
             size="sm"
             onClick={() => openSystemSettings("general")}
-            title={`系统设置（开机自启 · 录像与存储策略 · 版本 ${updateStatus?.current_version || "v2.3.0"}）`}
+            title={`系统设置（开机自启 · 录像与存储策略 · 版本 ${updateStatus?.current_version || "v2.3.1"}）`}
           >
             <Settings size={14} />
             <span>系统设置</span>
