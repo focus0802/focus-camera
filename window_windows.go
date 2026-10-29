@@ -386,7 +386,7 @@ func runNativeDesktopWindow(appURL string, startInTray bool) {
 		log.Printf("检测到系统 WebView2 运行时 (%s)，正在启动原生 Win32 桌面窗口 (startInTray=%v)...", ver, startInTray)
 		initW, initH, _, _ := resolveInitialWindowBounds(1640, 960)
 		w := webview2.NewWithOptions(webview2.WebViewOptions{
-			Debug:     true,
+			Debug:     os.Getenv("FOCUS_DEBUG") == "1",
 			AutoFocus: !startInTray,
 			DataPath:  dataPath,
 			WindowOptions: webview2.WindowOptions{
@@ -416,7 +416,7 @@ func runNativeDesktopWindow(appURL string, startInTray bool) {
 			} else {
 				_, _, _ = procShowWindow.Call(hwnd, 5 /* SW_SHOW */)
 			}
-			w.Init("window.__FOCUS_PLATFORM__ = 'windows';")
+			w.Init("window.__FOCUS_PLATFORM__ = 'windows'; window.addEventListener('contextmenu', function(e) { var t = e.target; if (t && t.closest && t.closest('input, textarea, [contenteditable=\"true\"]')) return; e.preventDefault(); }, true);")
 			_ = w.Bind("focusSyncWindowTheme", func(theme string) {
 				w.Dispatch(func() {
 					applyWindowsImmersiveTheme(hwnd, theme != "light")

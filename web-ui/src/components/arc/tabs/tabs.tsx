@@ -23,13 +23,15 @@ export function Tabs({ value, defaultValue, onValueChange, className, ...props }
   const leavingRectRef = useRef<DOMRect | null>(null);
   function handleChange(next: string) {
     const frame = root.current;
-    leavingRectRef.current = frame?.querySelector(':scope > [role="tabpanel"][data-state="active"]')?.getBoundingClientRect() ?? null;
+    const activePanel = frame?.querySelector<HTMLElement>(':scope > [role="tabpanel"][data-state="active"]');
+    leavingRectRef.current = activePanel?.getBoundingClientRect() ?? null;
+    if (activePanel) panelHeightRef.current = activePanel.offsetHeight;
     const order = frame ? Array.from(frame.querySelectorAll<HTMLElement>('[role="tab"][data-value]')).filter(tab => tab.closest(`.${styles.root}`) === frame).map(tab => tab.dataset.value) : [];
     const from = order.indexOf(active), to = order.indexOf(next);
     if (from >= 0 && to >= 0 && from !== to) setDirection(to > from ? 1 : -1);
     if (value === undefined) setInternal(next); onValueChange?.(next);
   }
-  return <TabsContext.Provider value={{ active, layoutId, direction, panelHeightRef, leavingRectRef }}><LayoutGroup id={layoutId}><TabsPrimitive.Root {...props} ref={root} className={[styles.root, className].filter(Boolean).join(" ")} value={active} onValueChange={handleChange}/></LayoutGroup></TabsContext.Provider>;
+  return <TabsContext.Provider value={{ active, layoutId, direction, panelHeightRef, leavingRectRef }}><LayoutGroup id={layoutId} inherit={false}><TabsPrimitive.Root {...props} ref={root} className={[styles.root, className].filter(Boolean).join(" ")} value={active} onValueChange={handleChange}/></LayoutGroup></TabsContext.Provider>;
 }
 
 export function TabsList({ className, ...props }: ComponentPropsWithoutRef<typeof TabsPrimitive.List>) {
@@ -75,7 +77,7 @@ export function TabsList({ className, ...props }: ComponentPropsWithoutRef<typeo
   const scrollTabs = (direction: number) => viewport.current?.scrollBy({ left: direction * (viewport.current?.clientWidth ?? 0) * .75, behavior: reduced ? "instant" : "smooth" });
   return <div ref={shell} className={styles.listShell} data-overflow={edges.overflow} data-left={edges.left} data-right={edges.right}>
     {edges.overflow && <button type="button" className={`${styles.scrollButton} ${styles.scrollLeft}`} aria-label="Scroll tabs left" disabled={!edges.left} onClick={() => scrollTabs(-1)}><NavArrowLeft width={17} height={17} aria-hidden="true"/></button>}
-    <motion.div ref={viewport} layoutScroll className={styles.viewport} onFocusCapture={event => { if (event.target instanceof HTMLElement && event.target.getAttribute("role") === "tab") reveal(event.target); }}>
+    <motion.div ref={viewport} layout="position" layoutDependency={active} layoutScroll className={styles.viewport} onFocusCapture={event => { if (event.target instanceof HTMLElement && event.target.getAttribute("role") === "tab") reveal(event.target); }}>
       <TabsPrimitive.List {...props} ref={list} className={[styles.list, className].filter(Boolean).join(" ")}/>
     </motion.div>
     {edges.overflow && <button type="button" className={`${styles.scrollButton} ${styles.scrollRight}`} aria-label="Scroll tabs right" disabled={!edges.right} onClick={() => scrollTabs(1)}><NavArrowRight width={17} height={17} aria-hidden="true"/></button>}
@@ -87,7 +89,7 @@ export function TabsTrigger({ className, children, value, ...props }: ComponentP
   const reduced = useReducedMotion();
   // The LayoutGroup in Tabs scopes the highlight to this instance, so it glides between triggers but never flies in from another tab set.
   return <TabsPrimitive.Trigger {...props} value={value} data-value={value} className={[styles.trigger, className].filter(Boolean).join(" ")}>
-    {active === value && <motion.span className={styles.selection} layoutId="selection" layoutDependency={active} transition={reduced ? { duration: 0 } : motionTokens.spring.morph} aria-hidden="true"/>}
+    {active === value && <motion.span className={styles.selection} layout="x" layoutId="selection" layoutDependency={active} transition={reduced ? { duration: 0 } : motionTokens.spring.morph} aria-hidden="true"/>}
     <span className={styles.triggerLabel}>{children}</span>
   </TabsPrimitive.Trigger>;
 }
@@ -122,8 +124,20 @@ export function TabsContent({ className, value, forceMount, children, ...props }
     let controls: AnimationPlaybackControls | undefined;
     const release = () => { node.style.height = ""; node.style.overflow = ""; };
     if (from !== null && Math.abs(from - to) > 1 && !reduced) {
-      if (to > from) node.style.overflow = "clip";
-      controls = animate(node, { height: [from, to] }, { ...motionTokens.spring.smooth, onComplete: release });
+      node.style.overflow = "clip";
+      node.style.height = `${from}px`;
+      controls = animate(from, to, {
+        ...motionTokens.spring.smooth,
+        onUpdate: (v) => {
+          if (Math.abs(node.scrollHeight - to) > 2) {
+            controls?.stop();
+            release();
+            return;
+          }
+          node.style.height = `${v}px`;
+        },
+        onComplete: release,
+      });
     }
     panelHeightRef.current = controls && from !== null ? from : to;
     const observer = new ResizeObserver(() => { panelHeightRef.current = node.offsetHeight; });

@@ -144,6 +144,19 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    const onContextMenu = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest('input, textarea, [contenteditable="true"]')) {
+        return;
+      }
+      e.preventDefault();
+    };
+    window.addEventListener("contextmenu", onContextMenu, { capture: true });
+    return () =>
+      window.removeEventListener("contextmenu", onContextMenu, { capture: true });
+  }, []);
+
+  useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem("focus_theme", theme);
     window.webkit?.messageHandlers?.focusWindow?.postMessage(`theme:${theme}`);
@@ -1227,7 +1240,7 @@ export function App() {
             variant="ghost"
             size="sm"
             onClick={() => openSystemSettings("general")}
-            title={`系统设置（开机自启 · 录像与存储策略 · 版本 ${updateStatus?.current_version || "v2.4.0"}）`}
+            title={`系统设置（开机自启 · 录像与存储策略 · 版本 ${updateStatus?.current_version || "v2.4.1"}）`}
           >
             <Settings size={14} />
             <span>系统设置</span>

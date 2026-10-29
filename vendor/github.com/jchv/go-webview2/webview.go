@@ -120,12 +120,13 @@ func NewWithOptions(options WebViewOptions) WebView {
 	if err != nil {
 		log.Fatal(err)
 	}
-	// disable context menu
-	err = settings.PutAreDefaultContextMenusEnabled(options.Debug)
+	// Keep native context menus enabled at the WebView2 layer so JS can selectively
+	// allow <input>/<textarea> Cut/Copy/Paste while blocking non-input areas via preventDefault().
+	err = settings.PutAreDefaultContextMenusEnabled(true)
 	if err != nil {
 		log.Fatal(err)
 	}
-	// disable developer tools
+	// disable developer tools unless Debug is enabled
 	err = settings.PutAreDevToolsEnabled(options.Debug)
 	if err != nil {
 		log.Fatal(err)

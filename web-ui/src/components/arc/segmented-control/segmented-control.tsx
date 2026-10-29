@@ -63,9 +63,9 @@ export default function SegmentedControl({ options, value, onValueChange, label,
   };
 
   return <div className={`${styles.root} ${className ?? ""}`} role="group" aria-label={label}>
-    <LayoutGroup id={id}><motion.div ref={track} layoutScroll className={styles.track}>
+    <LayoutGroup id={id} inherit={false}><motion.div ref={track} layout="position" layoutDependency={value} layoutScroll className={styles.track}>
       {options.map((option, index) => <button key={option.value} id={`${id}-${option.value}`} className={styles.button} type="button" data-value={option.value} aria-pressed={value === option.value} tabIndex={index === selectedIndex ? 0 : -1} onClick={() => onValueChange(option.value)} onKeyDown={onKeyDown} onPointerEnter={onOptionIntent ? () => onOptionIntent(option.value) : undefined} onFocus={onOptionIntent ? () => onOptionIntent(option.value) : undefined}>
-        {value === option.value && <motion.span className={styles.selection} layoutId="selection" layoutDependency={value} transition={reduced ? { duration: 0 } : motionTokens.spring.morph} aria-hidden="true" />}
+        {value === option.value && <motion.span className={styles.selection} layout="x" layoutId="selection" layoutDependency={value} transition={reduced ? { duration: 0 } : motionTokens.spring.morph} aria-hidden="true" />}
         <span className={styles.label}>{option.label}{option.accessory}</span>
       </button>)}
     </motion.div></LayoutGroup>

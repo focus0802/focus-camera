@@ -292,13 +292,15 @@ static NSImage* createFocusCameraIcon(BOOL fullBleed) {
 	WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
 	config.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
 	[config.userContentController addScriptMessageHandler:self name:@"focusWindow"];
-	NSString *initScript = @"document.documentElement.dataset.platform = 'macos'; document.documentElement.dataset.windowMode = 'windowed';";
+	NSString *initScript = @"document.documentElement.dataset.platform = 'macos'; document.documentElement.dataset.windowMode = 'windowed'; window.addEventListener('contextmenu', function(e) { var t = e.target; if (t && t.closest && t.closest('input, textarea, [contenteditable=\"true\"]')) return; e.preventDefault(); }, true);";
 	WKUserScript *userScript = [[WKUserScript alloc] initWithSource:initScript
 	                                                  injectionTime:WKUserScriptInjectionTimeAtDocumentStart
 	                                               forMainFrameOnly:YES];
 	[config.userContentController addUserScript:userScript];
 	@try {
-		[config.preferences setValue:@YES forKey:@"developerExtrasEnabled"];
+		const char *dbg = getenv("FOCUS_DEBUG");
+		BOOL enableDebug = (dbg != NULL && strcmp(dbg, "1") == 0);
+		[config.preferences setValue:@(enableDebug) forKey:@"developerExtrasEnabled"];
 	} @catch (NSException *exception) {}
 
 	self.webView = [[FocusWebView alloc] initWithFrame:[[self.window contentView] bounds]

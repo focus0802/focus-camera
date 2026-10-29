@@ -584,7 +584,7 @@ export function SystemSettingsModal({
                 <div className="modal-form-stack">
                   <div className="update-meta-strip">
                     <Badge tone="neutral" size="sm">
-                      当前版本 {updateStatus?.current_version || "v2.4.0"}
+                      当前版本 {updateStatus?.current_version || "v2.4.1"}
                     </Badge>
                     {updateStatus?.os_arch && (
                       <Badge tone="neutral" size="sm">
