@@ -530,8 +530,11 @@ decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
 
 @end
 
+static int g_cocoaAppRunning = 0;
+
 static void runCocoaDesktopWindow(const char *cUrl, int startInTray) {
 	@autoreleasepool {
+		g_cocoaAppRunning = 1;
 		NSApplication *app = [NSApplication sharedApplication];
 		[app setActivationPolicy:NSApplicationActivationPolicyRegular];
 
@@ -542,6 +545,10 @@ static void runCocoaDesktopWindow(const char *cUrl, int startInTray) {
 
 		[app run];
 	}
+}
+
+static int isCocoaAppRunning(void) {
+	return g_cocoaAppRunning;
 }
 
 static char* selectMacOSFolderDialog(const char *cInitialDir) {
@@ -579,10 +586,51 @@ static char* selectMacOSFolderDialog(const char *cInitialDir) {
 	}
 	return NULL;
 }
+
+static char* selectMacOSExportFileDialog(const char *cDefaultName, const char *cInitialDir) {
+	__block NSString *selectedPath = nil;
+	void (^runPanel)(void) = ^{
+		NSSavePanel *panel = [NSSavePanel savePanel];
+		[panel setTitle:@"导出 1080P 监控录像分片"];
+		[panel setMessage:@"请选择导出的目标文件夹与保存文件名："];
+		[panel setPrompt:@"导出 MP4"];
+		[panel setCanCreateDirectories:YES];
+		[panel setExtensionHidden:NO];
+		if (cDefaultName != NULL && strlen(cDefaultName) > 0) {
+			NSString *nameStr = [NSString stringWithUTF8String:cDefaultName];
+			if (nameStr != nil && [nameStr length] > 0) {
+				[panel setNameFieldStringValue:nameStr];
+			}
+		}
+		if (cInitialDir != NULL && strlen(cInitialDir) > 0) {
+			NSString *dirStr = [NSString stringWithUTF8String:cInitialDir];
+			BOOL isDir = NO;
+			if (dirStr && [[NSFileManager defaultManager] fileExistsAtPath:dirStr isDirectory:&isDir] && isDir) {
+				[panel setDirectoryURL:[NSURL fileURLWithPath:dirStr isDirectory:YES]];
+			}
+		}
+		[NSApp activateIgnoringOtherApps:YES];
+		NSModalResponse resp = [panel runModal];
+		if (resp == NSModalResponseOK && [panel URL] != nil) {
+			selectedPath = [[panel URL] path];
+		}
+	};
+	if ([NSThread isMainThread]) {
+		runPanel();
+	} else {
+		dispatch_sync(dispatch_get_main_queue(), runPanel);
+	}
+	if (selectedPath != nil && [selectedPath length] > 0) {
+		return strdup([selectedPath UTF8String]);
+	}
+	return NULL;
+}
 */
 import "C"
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"unsafe"
@@ -608,6 +656,18 @@ func selectNativeStorageFolder(initialDir string) (string, bool, error) {
 			cleanInit = ""
 		}
 	}
+	if C.isCocoaAppRunning() == 0 {
+		script := `POSIX path of (choose folder with prompt "请选择用于保存 1080P 监控录像分片 (MP4) 的本地磁盘文件夹：")`
+		out, err := exec.Command("/usr/bin/osascript", "-e", script).Output()
+		if err != nil {
+			return "", true, nil
+		}
+		selected := strings.TrimSpace(string(out))
+		if selected == "" {
+			return "", true, nil
+		}
+		return filepath.Clean(selected), false, nil
+	}
 	cInit := C.CString(cleanInit)
 	defer C.free(unsafe.Pointer(cInit))
 
@@ -619,6 +679,67 @@ func selectNativeStorageFolder(initialDir string) (string, bool, error) {
 	selected := strings.TrimSpace(C.GoString(cSelected))
 	if selected == "" {
 		return "", true, nil
+	}
+	return selected, false, nil
+}
+
+func selectNativeExportFile(defaultFileName string, initialDir string) (string, bool, error) {
+	cleanInit := strings.TrimSpace(initialDir)
+	if cleanInit == "" {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			dl := filepath.Join(home, "Downloads")
+			if st, err := os.Stat(dl); err == nil && st.IsDir() {
+				cleanInit = dl
+			} else {
+				cleanInit = home
+			}
+		}
+	} else if abs, err := filepath.Abs(cleanInit); err == nil {
+		if st, err := os.Stat(abs); err == nil && st.IsDir() {
+			cleanInit = abs
+		}
+	}
+	cleanName := strings.TrimSpace(defaultFileName)
+	if cleanName == "" {
+		cleanName = "recording.mp4"
+	}
+	if !strings.HasSuffix(strings.ToLower(cleanName), ".mp4") {
+		cleanName += ".mp4"
+	}
+
+	if C.isCocoaAppRunning() == 0 {
+		safeName := strings.ReplaceAll(cleanName, `"`, `\"`)
+		script := fmt.Sprintf(`POSIX path of (choose file name with prompt "请选择导出的目标文件夹与保存文件名：" default name "%s")`, safeName)
+		out, err := exec.Command("/usr/bin/osascript", "-e", script).Output()
+		if err != nil {
+			return "", true, nil
+		}
+		selected := strings.TrimSpace(string(out))
+		if selected == "" {
+			return "", true, nil
+		}
+		if !strings.HasSuffix(strings.ToLower(selected), ".mp4") {
+			selected += ".mp4"
+		}
+		return selected, false, nil
+	}
+
+	cName := C.CString(cleanName)
+	defer C.free(unsafe.Pointer(cName))
+	cInit := C.CString(cleanInit)
+	defer C.free(unsafe.Pointer(cInit))
+
+	cSelected := C.selectMacOSExportFileDialog(cName, cInit)
+	if cSelected == nil {
+		return "", true, nil
+	}
+	defer C.free(unsafe.Pointer(cSelected))
+	selected := strings.TrimSpace(C.GoString(cSelected))
+	if selected == "" {
+		return "", true, nil
+	}
+	if !strings.HasSuffix(strings.ToLower(selected), ".mp4") {
+		selected += ".mp4"
 	}
 	return selected, false, nil
 }

@@ -59,6 +59,7 @@
 ## 1. UI Component & Feedback Guardrails (`@uiarc` First)
 - **Never Use Native Browser Dialogs**: Never call `window.alert()`, `window.confirm()`, or `window.prompt()`. Inside macOS WKWebView and Windows WebView2 desktop containers, native alerts block the UI thread or fail to render. Always use `@uiarc/dialog` (`Dialog`, `DialogContent`) for confirmations and `@uiarc/alert` (`Alert`) for inline status/error banners.
 - **Prefer `@uiarc` Over Hand-Rolled Controls**: Always use existing `@uiarc` components in `web-ui/src/components/arc/` (`Tabs`, `MorphSelect`, `SearchField`, `NumberField`, `TimePicker`, `PasswordField`, `Progress`, `Pagination`, `SortableDataTable`, `ReorderableList`, `AnimatedCounter`, `ScrollArea`, `Switch`, `Checkbox`, `Badge`, `Button`, `Input`) instead of raw `<select>`, `<input type="number">`, `<input type="time">`, or custom CSS widgets.
+- **Zero-Shift Top Header Navigation**: Keep `.top-header` as a 3-column CSS Grid (`grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr)`) with `.main-nav` (`Tabs`) centered in column 2 and tab-specific tools (`.header-live-controls`) in column 1 next to `.brand-area`, ensuring `Tabs` never shifts horizontally when switching views.
 
 ## 2. Public Repository Security & Credential Hygiene
 - **Zero Hardcoded Credentials**: This project is hosted in a public GitHub repository (`focus0802/focus-camera`). Never hardcode real camera passwords, studio IPs, or personal tokens in `web-ui/src/`, `internal/`, or `*_test.go`.
@@ -69,9 +70,11 @@
   - Typecheck: `/opt/homebrew/bin/node ./web-ui/node_modules/typescript/bin/tsc -p web-ui/tsconfig.json --noEmit`
   - Build UI: `/opt/homebrew/bin/node ./web-ui/node_modules/vite/bin/vite.js build web-ui`
 - **Go Vendor Mode**: Always pass `-mod=vendor` when running `/opt/homebrew/bin/go test` or `/opt/homebrew/bin/go build`.
+- **Always Sync `dist/` Binaries After Go Changes**: Because `main.go` serves `web/` live from disk while the user tests via `dist/FocusCamera-Windows-x64.exe` (Parallels) and `dist/FocusCamera.app` (macOS), any modification to `*.go` files must be followed by recompiling `dist/FocusCamera-Mac`, `dist/FocusCamera.app/Contents/MacOS/FocusCamera`, `dist/FocusCamera-Windows-x64.exe`, and `dist/FocusCamera-Windows-Console.exe` so new API routes are present in `dist/`.
 - **Git Proxy for GitHub**: When pushing to `github.com` on this machine, ensure local git proxy `http.https://github.com.proxy=http://127.0.0.1:7890` is configured.
 
 ## 4. Native Desktop & Self-Updater Invariants
 - **Loopback Binding on Windows**: Keep the embedded HTTP server bound to `127.0.0.1` (starting at `:18080` with automatic port fallback) so Windows Defender Firewall does not block local WebView2 connections.
 - **Graceful Recording Flush Before Exit/Upgrade**: Any shutdown (`/api/shutdown`) or self-upgrade (`updMgr.StartUpgrade`) must invoke `recMgr.StopAll()` before process termination or binary replacement so active 1080P fMP4 segments are finalized cleanly on disk.
 - **Fixed-Size But Draggable Desktop Window**: Keep the desktop window fixed to the screen work area and non-resizable (`minSize == maxSize`, no `NSWindowStyleMaskResizable` on macOS, block `SC_SIZE`/`SC_MAXIMIZE` on Windows), while always preserving top-bar dragging (`onMouseDown={handleHeaderMouseDown}` -> `"drag"`, `[window setMovable:YES]` on macOS, `WM_NCLBUTTONDOWN` `HTCAPTION` + `SC_MOVE` on Windows).
+- **Native Save Dialog for MP4 Export**: Never use `<a download>` for exporting local MP4 segments (which fails in `WKWebView` or silently dumps into `Downloads` in `WebView2`). Always call `POST /api/recordings/export` (`selectNativeExportFile` via `NSSavePanel` on macOS / `GetSaveFileNameW` on Windows + local `io.Copy`).

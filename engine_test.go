@@ -233,6 +233,23 @@ func TestListSegmentsAllDates(t *testing.T) {
 	if len(daySegs) != 1 || daySegs[0].Date != "2026-10-24" {
 		t.Fatalf("Expected 1 segment for 2026-10-24, got %+v", daySegs)
 	}
+
+	// Add a manual recording on 2026-10-25 and verify GetStorageSummaryForCamera
+	if err := os.WriteFile(filepath.Join(recDir, "2026-10-25", camID, "142000__6号琴房__manual.mp4"), dummyBytes, 0o644); err != nil {
+		t.Fatalf("WriteFile manual err: %v", err)
+	}
+	sumAll := recMgr.GetStorageSummaryForCamera("")
+	if len(sumAll.AvailableDates) != 2 || sumAll.TotalFiles != 3 {
+		t.Fatalf("Expected 2 dates and 3 total files, got %+v", sumAll)
+	}
+	ds25 := sumAll.DateSummaries["2026-10-25"]
+	if ds25.SegmentCount != 2 || ds25.AutoCount != 1 || ds25.ManualCount != 1 {
+		t.Fatalf("Unexpected DateSummary for 2026-10-25: %+v", ds25)
+	}
+	sumOtherCam := recMgr.GetStorageSummaryForCamera("non_existent_cam")
+	if len(sumOtherCam.AvailableDates) != 0 || sumOtherCam.TotalFiles != 3 {
+		t.Fatalf("Expected 0 camera dates for non_existent_cam while preserving TotalFiles=3, got %+v", sumOtherCam)
+	}
 }
 
 func TestInspect233And100(t *testing.T) {

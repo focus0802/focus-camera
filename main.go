@@ -608,7 +608,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		var req struct {
 			DefaultUsername   string                  `json:"default_username"`
-			DefaultPassword   string                  `json:"default_password"`
+			DefaultPassword   *string                 `json:"default_password"`
 			SubnetPrefix      string                  `json:"subnet_prefix"`
 			Recording         *config.RecordingConfig `json:"recording"`
 			StorageDir        string                  `json:"storage_dir"`
@@ -623,7 +623,8 @@ func main() {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		recCfg := store.GetConfig().Recording
+		curAppCfg := store.GetConfig()
+		recCfg := curAppCfg.Recording
 		if req.Recording != nil {
 			recCfg = *req.Recording
 		} else {
@@ -647,7 +648,11 @@ func main() {
 				recCfg.ScheduleEndTime = req.ScheduleEndTime
 			}
 		}
-		if err := store.UpdateAppSettings(req.DefaultUsername, req.DefaultPassword, req.SubnetPrefix, recCfg); err != nil {
+		nextDefaultPass := curAppCfg.DefaultPassword
+		if req.DefaultPassword != nil {
+			nextDefaultPass = *req.DefaultPassword
+		}
+		if err := store.UpdateAppSettings(req.DefaultUsername, nextDefaultPass, req.SubnetPrefix, recCfg); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -1346,7 +1351,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		dateStr := r.URL.Query().Get("date")
 		camID := r.URL.Query().Get("camera_id")
-		summary := recMgr.GetStorageSummary()
+		summary := recMgr.GetStorageSummaryForCamera(camID)
 		segments := recMgr.ListSegments(dateStr, camID)
 		statusMap := recMgr.GetStatus()
 		statesList := make([]recorder.CameraRecordState, 0, len(statusMap))
@@ -1354,16 +1359,17 @@ func main() {
 			statesList = append(statesList, st)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"ok":            true,
-			"date":          dateStr,
-			"config":        store.GetConfig().Recording,
-			"states":        statesList,
-			"dates":         summary.AvailableDates,
-			"total_bytes":   summary.TotalBytes,
-			"segment_count": summary.TotalFiles,
-			"summary":       summary,
-			"segments":      segments,
-			"record_status": statusMap,
+			"ok":             true,
+			"date":           dateStr,
+			"config":         store.GetConfig().Recording,
+			"states":         statesList,
+			"dates":          summary.AvailableDates,
+			"date_summaries": summary.DateSummaries,
+			"total_bytes":    summary.TotalBytes,
+			"segment_count":  summary.TotalFiles,
+			"summary":        summary,
+			"segments":       segments,
+			"record_status":  statusMap,
 		})
 	})
 
@@ -1454,9 +1460,27 @@ func main() {
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		var req struct {
-			Path string `json:"path"`
+			Path       string `json:"path"`
+			SelectFile string `json:"select_file"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
+		selectFile := strings.TrimSpace(req.SelectFile)
+		if selectFile != "" {
+			if absFile, err := filepath.Abs(selectFile); err == nil {
+				if st, err := os.Stat(absFile); err == nil && !st.IsDir() {
+					switch runtime.GOOS {
+					case "windows":
+						_ = exec.Command("explorer", "/select,"+absFile).Start()
+					case "darwin":
+						_ = exec.Command("open", "-R", absFile).Start()
+					default:
+						_ = exec.Command("xdg-open", filepath.Dir(absFile)).Start()
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "path": absFile})
+					return
+				}
+			}
+		}
 		targetDir := strings.TrimSpace(req.Path)
 		if targetDir == "" {
 			targetDir = store.GetConfig().Recording.StorageDir
@@ -1475,6 +1499,111 @@ func main() {
 			_ = exec.Command("xdg-open", absDir).Start()
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "path": absDir})
+	})
+
+	var (
+		exportDirMu   sync.Mutex
+		lastExportDir string
+	)
+	mux.HandleFunc("/api/recordings/export", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		var req struct {
+			Path          string `json:"path"`
+			SuggestedName string `json:"suggested_name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		srcPath, err := recMgr.ResolveSafeFilePath(req.Path)
+		if err != nil {
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		srcInfo, err := os.Stat(srcPath)
+		if err != nil || srcInfo.IsDir() {
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "录像文件不存在"})
+			return
+		}
+
+		suggestedName := strings.TrimSpace(req.SuggestedName)
+		if suggestedName == "" {
+			// Build a clean default filename: <RoomName>_<YYYY-MM-DD>_<HHMMSS>.mp4
+			cleanRel := filepath.ToSlash(strings.TrimSpace(req.Path))
+			relParts := strings.Split(cleanRel, "/")
+			base := strings.TrimSuffix(filepath.Base(srcPath), filepath.Ext(srcPath))
+			nameParts := strings.Split(base, "__")
+			if len(relParts) >= 3 && len(nameParts) >= 2 {
+				datePart := relParts[0]
+				timePart := nameParts[0]
+				roomPart := nameParts[1]
+				suggestedName = fmt.Sprintf("%s_%s_%s.mp4", roomPart, datePart, timePart)
+			} else {
+				suggestedName = filepath.Base(srcPath)
+			}
+		}
+
+		exportDirMu.Lock()
+		initDir := lastExportDir
+		exportDirMu.Unlock()
+
+		destPath, cancelled, err := selectNativeExportFile(suggestedName, initDir)
+		if err != nil {
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		if cancelled || strings.TrimSpace(destPath) == "" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "cancelled": true})
+			return
+		}
+
+		if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "无法创建导出目录: " + err.Error()})
+			return
+		}
+
+		srcFile, err := os.Open(srcPath)
+		if err != nil {
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "读取原录像分片失败: " + err.Error()})
+			return
+		}
+		defer srcFile.Close()
+
+		dstFile, err := os.Create(destPath)
+		if err != nil {
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "写入目标文件失败: " + err.Error()})
+			return
+		}
+		written, copyErr := io.Copy(dstFile, srcFile)
+		closeErr := dstFile.Close()
+		if copyErr != nil || closeErr != nil {
+			_ = os.Remove(destPath)
+			errMsg := "导出拷贝失败"
+			if copyErr != nil {
+				errMsg = copyErr.Error()
+			} else if closeErr != nil {
+				errMsg = closeErr.Error()
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": errMsg})
+			return
+		}
+
+		exportDirMu.Lock()
+		lastExportDir = filepath.Dir(destPath)
+		exportDirMu.Unlock()
+
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":         true,
+			"cancelled":  false,
+			"path":       destPath,
+			"dir":        filepath.Dir(destPath),
+			"filename":   filepath.Base(destPath),
+			"size_bytes": written,
+		})
 	})
 
 	mux.HandleFunc("/api/recordings/select-folder", func(w http.ResponseWriter, r *http.Request) {
@@ -1513,11 +1642,23 @@ func main() {
 
 	mux.HandleFunc("/api/recordings/disk-info", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		rc := store.GetConfig().Recording
 		targetDir := strings.TrimSpace(r.URL.Query().Get("path"))
 		if targetDir == "" {
-			targetDir = store.GetConfig().Recording.StorageDir
+			targetDir = rc.StorageDir
 		}
 		info := recorder.InspectDiskSpace(targetDir)
+		// If the active recording config has a MaxStorageGB larger than the physical disk's MaxQuotaGB,
+		// automatically clamp and persist it so it does not repeatedly reset to 500 GB.
+		if strings.EqualFold(filepath.Clean(targetDir), filepath.Clean(rc.StorageDir)) &&
+			info.TotalBytes > 0 && info.MaxQuotaGB > 0 && rc.MaxStorageGB > info.MaxQuotaGB {
+			nextQuota := info.RecommendedQuotaGB
+			if nextQuota < 1 || nextQuota > info.MaxQuotaGB {
+				nextQuota = info.MaxQuotaGB
+			}
+			rc.MaxStorageGB = nextQuota
+			_ = store.SetRecordingConfig(rc)
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ok":   true,
 			"disk": info,

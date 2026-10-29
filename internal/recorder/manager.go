@@ -61,13 +61,23 @@ type SegmentItem struct {
 	Active      bool   `json:"active"`
 }
 
+type DateSummary struct {
+	Date         string `json:"date"`
+	SegmentCount int    `json:"segment_count"`
+	AutoCount    int    `json:"auto_count"`
+	ManualCount  int    `json:"manual_count"`
+	Active       bool   `json:"active"`
+	TotalBytes   int64  `json:"total_bytes"`
+}
+
 type StorageSummary struct {
-	StorageDir     string   `json:"storage_dir"`
-	TotalBytes     int64    `json:"total_bytes"`
-	TotalFiles     int      `json:"total_files"`
-	MaxStorageGB   int      `json:"max_storage_gb"`
-	RetentionDays  int      `json:"retention_days"`
-	AvailableDates []string `json:"available_dates"`
+	StorageDir     string                 `json:"storage_dir"`
+	TotalBytes     int64                  `json:"total_bytes"`
+	TotalFiles     int                    `json:"total_files"`
+	MaxStorageGB   int                    `json:"max_storage_gb"`
+	RetentionDays  int                    `json:"retention_days"`
+	AvailableDates []string               `json:"available_dates"`
+	DateSummaries  map[string]DateSummary `json:"date_summaries"`
 }
 
 type DiskSpaceInfo struct {
@@ -134,7 +144,11 @@ func InspectDiskSpace(rawDir string) DiskSpaceInfo {
 		}
 	}
 
-	maxQuotaGB := int(freeBytes / gb)
+	availPoolBytes := freeBytes + uint64(usedRecBytes)
+	if availPoolBytes > totalBytes {
+		availPoolBytes = totalBytes
+	}
+	maxQuotaGB := int(availPoolBytes / gb)
 	if maxQuotaGB < 1 {
 		maxQuotaGB = 1
 	}
@@ -188,6 +202,16 @@ type Manager struct {
 }
 
 func NewManager(store *config.Store, hub *rtsp.StreamHub) *Manager {
+	rc := store.GetConfig().Recording
+	disk := InspectDiskSpace(effectiveStorageDir(rc.StorageDir))
+	if disk.TotalBytes > 0 && disk.MaxQuotaGB > 0 && rc.MaxStorageGB > disk.MaxQuotaGB {
+		nextQuota := disk.RecommendedQuotaGB
+		if nextQuota < 1 || nextQuota > disk.MaxQuotaGB {
+			nextQuota = disk.MaxQuotaGB
+		}
+		rc.MaxStorageGB = nextQuota
+		_ = store.SetRecordingConfig(rc)
+	}
 	m := &Manager{
 		store:        store,
 		hub:          hub,
@@ -642,6 +666,10 @@ func (m *Manager) GetStatus() map[string]CameraRecordState {
 }
 
 func (m *Manager) GetStorageSummary() StorageSummary {
+	return m.GetStorageSummaryForCamera("")
+}
+
+func (m *Manager) GetStorageSummaryForCamera(filterCamID string) StorageSummary {
 	rc := m.store.GetConfig().Recording
 	storageDir := effectiveStorageDir(rc.StorageDir)
 	sum := StorageSummary{
@@ -649,33 +677,80 @@ func (m *Manager) GetStorageSummary() StorageSummary {
 		MaxStorageGB:   rc.MaxStorageGB,
 		RetentionDays:  rc.RetentionDays,
 		AvailableDates: []string{},
+		DateSummaries:  make(map[string]DateSummary),
 	}
 	entries, err := os.ReadDir(storageDir)
 	if err != nil {
 		return sum
 	}
-	dateSet := make(map[string]bool)
+
+	activePaths := make(map[string]bool)
+	m.mu.Lock()
+	for _, w := range m.workers {
+		w.mu.Lock()
+		if w.relPath != "" {
+			activePaths[w.relPath] = true
+		}
+		w.mu.Unlock()
+	}
+	m.mu.Unlock()
+
+	filterCamID = strings.TrimSpace(filterCamID)
 	for _, e := range entries {
 		if !e.IsDir() || len(e.Name()) != 10 {
 			continue
 		}
-		dateDir := filepath.Join(storageDir, e.Name())
-		hasMP4 := false
-		_ = filepath.WalkDir(dateDir, func(path string, d os.DirEntry, err error) error {
-			if err == nil && !d.IsDir() && strings.HasSuffix(strings.ToLower(d.Name()), ".mp4") {
-				if info, err := d.Info(); err == nil && info.Size() > 512 {
-					sum.TotalBytes += info.Size()
-					sum.TotalFiles++
-					hasMP4 = true
-				}
+		dStr := e.Name()
+		dateDir := filepath.Join(storageDir, dStr)
+		camDirs, err := os.ReadDir(dateDir)
+		if err != nil {
+			continue
+		}
+		for _, cd := range camDirs {
+			if !cd.IsDir() {
+				continue
 			}
-			return nil
-		})
-		if hasMP4 {
-			dateSet[e.Name()] = true
+			camID := cd.Name()
+			matchesCam := filterCamID == "" || filterCamID == "all" || camID == filterCamID
+			files, err := os.ReadDir(filepath.Join(dateDir, camID))
+			if err != nil {
+				continue
+			}
+			for _, f := range files {
+				if f.IsDir() || !strings.HasSuffix(strings.ToLower(f.Name()), ".mp4") {
+					continue
+				}
+				info, err := f.Info()
+				if err != nil || info.Size() <= 512 {
+					continue
+				}
+				sum.TotalBytes += info.Size()
+				sum.TotalFiles++
+
+				if !matchesCam {
+					continue
+				}
+				ds := sum.DateSummaries[dStr]
+				ds.Date = dStr
+				ds.SegmentCount++
+				ds.TotalBytes += info.Size()
+
+				base := strings.TrimSuffix(f.Name(), filepath.Ext(f.Name()))
+				parts := strings.Split(base, "__")
+				if len(parts) >= 3 && parts[2] == "manual" {
+					ds.ManualCount++
+				} else {
+					ds.AutoCount++
+				}
+				relPath := filepath.ToSlash(filepath.Join(dStr, camID, f.Name()))
+				if activePaths[relPath] {
+					ds.Active = true
+				}
+				sum.DateSummaries[dStr] = ds
+			}
 		}
 	}
-	for d := range dateSet {
+	for d := range sum.DateSummaries {
 		sum.AvailableDates = append(sum.AvailableDates, d)
 	}
 	sort.Sort(sort.Reverse(sort.StringSlice(sum.AvailableDates)))

@@ -615,6 +615,12 @@ func (cs *cameraStream) streamOnce() error {
 	streamPath := cs.cam.ResolveStreamPath(cs.streamType)
 	baseURI := formatRTSPURI(cs.cam.IP, port, streamPath)
 
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", cs.cam.IP, port), 3*time.Second)
+	if err != nil {
+		return fmt.Errorf("连接 RTSP 失败: %w", err)
+	}
+	defer conn.Close()
+
 	releaseHandshake := paceRTSPHandshake()
 	handshakeReleased := false
 	finishHandshake := func() {
@@ -624,12 +630,6 @@ func (cs *cameraStream) streamOnce() error {
 		}
 	}
 	defer finishHandshake()
-
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", cs.cam.IP, port), 4*time.Second)
-	if err != nil {
-		return fmt.Errorf("连接 RTSP 失败: %w", err)
-	}
-	defer conn.Close()
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		_ = tcpConn.SetNoDelay(true)
 		_ = tcpConn.SetReadBuffer(256 * 1024)

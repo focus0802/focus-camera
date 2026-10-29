@@ -1118,57 +1118,9 @@ export function App() {
               )}
             </div>
           </div>
-        </div>
 
-        <nav className="main-nav" aria-label="主功能导航">
-          <Tabs
-            value={activeTab}
-            onValueChange={(val) => setActiveTab(val as NavTab)}
-          >
-            <TabsList aria-label="主功能视图切换">
-              <TabsTrigger value="live">实时监控 ({cameras.length})</TabsTrigger>
-              <TabsTrigger value="playback">
-                录像回放 ({recordingsPayload?.segment_count ?? 0})
-              </TabsTrigger>
-              <TabsTrigger value="devices">设备管理</TabsTrigger>
-            </TabsList>
-          </Tabs>
-        </nav>
-
-        <div className="header-actions">
           {activeTab === "live" && cameras.length > 0 && (
             <div className="header-live-controls">
-              {hasActiveFilter && (
-                <button
-                  type="button"
-                  className="active-filter-chip"
-                  onClick={() => {
-                    setSelectedGroup("all");
-                    setSearchText("");
-                    setCurrentPage(0);
-                  }}
-                  title="点击一键清除当前分组与关键字筛选"
-                >
-                  <span>
-                    {selectedGroup !== "all" ? selectedGroup : ""}
-                    {selectedGroup !== "all" && searchText.trim() ? " · " : ""}
-                    {searchText.trim() ? `"${searchText.trim()}"` : ""}
-                  </span>
-                  <X size={12} aria-hidden="true" />
-                </button>
-              )}
-
-              {gridMode !== "all" && totalPages > 1 && (
-                <div className="header-pagination-wrap">
-                  <Pagination
-                    page={safePage + 1}
-                    pageCount={totalPages}
-                    onPageChange={(p) => setCurrentPage(p - 1)}
-                    label="监控画面分页导航"
-                  />
-                </div>
-              )}
-
               <Button
                 variant="secondary"
                 size="sm"
@@ -1209,9 +1161,57 @@ export function App() {
                 {immersiveMode ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
                 <span>{immersiveMode ? "退出沉浸" : "沉浸"}</span>
               </Button>
+
+              {hasActiveFilter && (
+                <button
+                  type="button"
+                  className="active-filter-chip"
+                  onClick={() => {
+                    setSelectedGroup("all");
+                    setSearchText("");
+                    setCurrentPage(0);
+                  }}
+                  title="点击一键清除当前分组与关键字筛选"
+                >
+                  <span>
+                    {selectedGroup !== "all" ? selectedGroup : ""}
+                    {selectedGroup !== "all" && searchText.trim() ? " · " : ""}
+                    {searchText.trim() ? `"${searchText.trim()}"` : ""}
+                  </span>
+                  <X size={12} aria-hidden="true" />
+                </button>
+              )}
+
+              {gridMode !== "all" && totalPages > 1 && (
+                <div className="header-pagination-wrap">
+                  <Pagination
+                    page={safePage + 1}
+                    pageCount={totalPages}
+                    onPageChange={(p) => setCurrentPage(p - 1)}
+                    label="监控画面分页导航"
+                  />
+                </div>
+              )}
             </div>
           )}
+        </div>
 
+        <nav className="main-nav" aria-label="主功能导航">
+          <Tabs
+            value={activeTab}
+            onValueChange={(val) => setActiveTab(val as NavTab)}
+          >
+            <TabsList aria-label="主功能视图切换">
+              <TabsTrigger value="live">实时监控 ({cameras.length})</TabsTrigger>
+              <TabsTrigger value="playback">
+                录像回放 ({recordingsPayload?.segment_count ?? 0})
+              </TabsTrigger>
+              <TabsTrigger value="devices">设备管理</TabsTrigger>
+            </TabsList>
+          </Tabs>
+        </nav>
+
+        <div className="header-actions">
           {updateStatus?.has_update && (
             <Button
               variant="primary"
@@ -1227,7 +1227,7 @@ export function App() {
             variant="ghost"
             size="sm"
             onClick={() => openSystemSettings("general")}
-            title={`系统设置（开机自启 · 录像与存储策略 · 版本 ${updateStatus?.current_version || "v2.3.1"}）`}
+            title={`系统设置（开机自启 · 录像与存储策略 · 版本 ${updateStatus?.current_version || "v2.4.0"}）`}
           >
             <Settings size={14} />
             <span>系统设置</span>
@@ -1979,11 +1979,18 @@ export function App() {
         recordingConfig={recordingsPayload?.config ?? DEFAULT_REC_CONFIG}
         activeRecordingCount={activeRecordingCount}
         onSaveRecordingSettings={async (cfg) => {
-          await fetch("/api/settings", {
+          const res = await fetch("/api/settings", {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(cfg),
           });
+          if (!res.ok) {
+            const errText = await res.text().catch(() => "");
+            throw new Error(errText.trim() || `HTTP ${res.status}`);
+          }
+          setRecordingsPayload((prev) =>
+            prev ? { ...prev, config: cfg } : prev
+          );
           await fetchRecordings();
         }}
         updateStatus={updateStatus}

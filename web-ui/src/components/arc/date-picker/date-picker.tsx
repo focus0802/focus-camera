@@ -5,7 +5,7 @@ import type { ButtonHTMLAttributes, FocusEvent, KeyboardEvent } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import type { Variants } from "motion/react";
 import { CalendarDays, ChevronDown } from "lucide-react";
-import { Calendar, type CalendarDateMatcher } from "../calendar/calendar";
+import { Calendar, type CalendarDateMatcher, type CalendarDayMarker } from "../calendar/calendar";
 import { motionTokens } from "../lib/motion-tokens";
 import styles from "./date-picker.module.css";
 
@@ -18,6 +18,10 @@ export interface DatePickerProps extends Omit<ButtonHTMLAttributes<HTMLButtonEle
   minDate?: Date;
   maxDate?: Date;
   disabledDates?: CalendarDateMatcher;
+  /** Optional map (keyed by YYYY-MM-DD) or callback returning marker metadata for dates with recordings/events. */
+  dayMarkers?: Record<string, CalendarDayMarker> | ((date: Date, key: string) => CalendarDayMarker | undefined);
+  /** Shows a compact Auto/Manual dot legend in the calendar footer when dayMarkers are provided. */
+  showMarkerLegend?: boolean;
   locale?: string;
   format?: Intl.DateTimeFormatOptions;
   /** Adds a Today button to the calendar header. */
@@ -25,6 +29,7 @@ export interface DatePickerProps extends Omit<ButtonHTMLAttributes<HTMLButtonEle
 }
 
 const monthStart = (date: Date) => new Date(date.getFullYear(), date.getMonth(), 1);
+const toDateKey = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 const { spring, duration, ease, blur } = motionTokens;
 const instant = { duration: duration.instant };
 /** Each part of the date rolls with time: a later date rises from below, an earlier one drops from above. Parts that did not change stay still. */
@@ -42,7 +47,7 @@ const statusRise: Variants = {
   exit: { opacity: 0, y: "-0.3em", filter: `blur(${blur.subtle}px)`, transition: { duration: 0.14, ease: ease.standard } },
 };
 
-export function DatePicker({ label, value, onChange, description, placeholder = "Select a date", minDate, maxDate, disabledDates, locale = "en-US", format = { month: "short", day: "numeric", year: "numeric" }, showToday, id, className, disabled, ...buttonProps }: DatePickerProps) {
+export function DatePicker({ label, value, onChange, description, placeholder = "Select a date", minDate, maxDate, disabledDates, dayMarkers, showMarkerLegend, locale = "en-US", format = { month: "short", day: "numeric", year: "numeric" }, showToday, id, className, disabled, ...buttonProps }: DatePickerProps) {
   const generatedId = useId();
   const controlId = id ?? generatedId;
   const hintId = description ? `${controlId}-description` : undefined;
@@ -61,6 +66,19 @@ export function DatePicker({ label, value, onChange, description, placeholder = 
   const isZh = locale.toLowerCase().startsWith("zh");
   const shown = value ? formatter.format(value) : placeholder;
   const parts = value ? formatter.formatToParts(value) : [];
+  const selectedKey = value ? toDateKey(value) : "";
+  const selectedMarker = value && dayMarkers ? (typeof dayMarkers === "function" ? dayMarkers(value, selectedKey) : dayMarkers[selectedKey]) : undefined;
+  const markedDaysCount = dayMarkers && typeof dayMarkers !== "function"
+    ? Object.values(dayMarkers).filter((m) => m && (m.count === undefined || m.count > 0)).length
+    : 0;
+  const footerStatusText = value
+    ? selectedMarker?.count
+      ? (isZh ? `已选 ${formatter.format(value)} · ${selectedMarker.count}段` : `Selected ${formatter.format(value)} · ${selectedMarker.count}`)
+      : (isZh ? `已选 ${formatter.format(value)}` : `Selected ${formatter.format(value)}`)
+    : markedDaysCount > 0
+      ? (isZh ? `共 ${markedDaysCount} 天有录像` : `${markedDaysCount} days recorded`)
+      : (isZh ? "请选择日期" : "Choose a day");
+  const hasLegend = showMarkerLegend ?? Boolean(dayMarkers);
   // Parts after a wider or narrower segment move on the same curve the new text arrives on, so they never overlap it.
   const partMotion = reduce ? { duration: 0 } : { duration: duration.standard, ease: ease.enter };
 
@@ -122,8 +140,19 @@ export function DatePicker({ label, value, onChange, description, placeholder = 
           initial={reduce ? { opacity: 0 } : { opacity: 0, y: -8, scale: .95 }}
           animate={{ opacity: 1, y: 0, scale: 1, transition: reduce ? instant : { ...spring.snappy, opacity: { duration: duration.fast, ease: ease.enter } } }}
           exit={{ opacity: 0, ...(reduce ? {} : { y: -6, scale: .97 }), transition: { duration: 0.14, ease: ease.standard } }}>
-          <Calendar value={value} onChange={selectDate} month={month} onMonthChange={setMonth} minDate={minDate} maxDate={maxDate} disabledDates={disabledDates} locale={locale} showToday={showToday} />
-          <div className={styles.footer}><button type="button" onClick={() => selectDate(undefined)} disabled={!value}>{isZh ? "清空" : "Clear"}</button><span className={styles.status}><AnimatePresence initial={false}><motion.span key={time ?? "none"} variants={reduce ? valueFade : statusRise} initial="enter" animate="center" exit="exit">{value ? (isZh ? `已选 ${formatter.format(value)}` : `Selected ${formatter.format(value)}`) : (isZh ? "请选择日期" : "Choose a day")}</motion.span></AnimatePresence></span></div>
+          <Calendar value={value} onChange={selectDate} month={month} onMonthChange={setMonth} minDate={minDate} maxDate={maxDate} disabledDates={disabledDates} dayMarkers={dayMarkers} locale={locale} showToday={showToday} />
+          <div className={styles.footer}>
+            <div className={styles.footerLeft}>
+              <button type="button" onClick={() => selectDate(undefined)} disabled={!value}>{isZh ? "清空" : "Clear"}</button>
+              {hasLegend && (
+                <span className={styles.legend} aria-hidden="true">
+                  <span className={styles.legendItem}><i className={styles.legendDotAuto} />{isZh ? "自动" : "Auto"}</span>
+                  <span className={styles.legendItem}><i className={styles.legendDotManual} />{isZh ? "手动" : "Manual"}</span>
+                </span>
+              )}
+            </div>
+            <span className={styles.status}><AnimatePresence initial={false}><motion.span key={`${time ?? "none"}-${selectedMarker?.count ?? markedDaysCount}`} variants={reduce ? valueFade : statusRise} initial="enter" animate="center" exit="exit">{footerStatusText}</motion.span></AnimatePresence></span>
+          </div>
         </motion.div>}
       </AnimatePresence>
     </div>

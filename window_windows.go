@@ -38,10 +38,40 @@ var (
 	procCoInitializeEx   = ole32.NewProc("CoInitializeEx")
 	procCoTaskMemFree    = ole32.NewProc("CoTaskMemFree")
 
+	comdlg32                 = windows.NewLazySystemDLL("comdlg32.dll")
+	procGetSaveFileNameW     = comdlg32.NewProc("GetSaveFileNameW")
+	procCommDlgExtendedError = comdlg32.NewProc("CommDlgExtendedError")
+
 	winWindowMu    sync.Mutex
 	activeWebView  webview2.WebView
 	activeMainHWND uintptr
 )
+
+type openFileNameW struct {
+	LStructSize       uint32
+	HwndOwner         uintptr
+	HInstance         uintptr
+	LpstrFilter       *uint16
+	LpstrCustomFilter *uint16
+	NMaxCustFilter    uint32
+	NFilterIndex      uint32
+	LpstrFile         *uint16
+	NMaxFile          uint32
+	LpstrFileTitle    *uint16
+	NMaxFileTitle     uint32
+	LpstrInitialDir   *uint16
+	LpstrTitle        *uint16
+	Flags             uint32
+	NFileOffset       uint16
+	NFileExtension    uint16
+	LpstrDefExt       *uint16
+	LCustData         uintptr
+	LpfnHook          uintptr
+	LpTemplateName    *uint16
+	PvReserved        uintptr
+	DwReserved        uint32
+	FlagsEx           uint32
+}
 
 type browseInfoW struct {
 	HwndOwner      uintptr
@@ -135,6 +165,134 @@ func selectNativeStorageFolder(initialDir string) (string, bool, error) {
 	defer runtime.UnlockOSThread()
 	_, _, _ = procCoInitializeEx.Call(0, 2 /* COINIT_APARTMENTTHREADED */)
 	return showWin32FolderPicker(0, initialDir)
+}
+
+func sanitizeWindowsFileName(name string) string {
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(name) {
+		switch r {
+		case '<', '>', ':', '"', '/', '\\', '|', '?', '*':
+			b.WriteRune('_')
+		default:
+			if r >= 32 {
+				b.WriteRune(r)
+			}
+		}
+	}
+	res := strings.TrimSpace(strings.Trim(b.String(), ". "))
+	if res == "" {
+		return "recording.mp4"
+	}
+	return res
+}
+
+func showWin32SaveFilePicker(ownerHWND uintptr, defaultFileName string, initialDir string) (string, bool, error) {
+	cleanName := sanitizeWindowsFileName(defaultFileName)
+	if !strings.HasSuffix(strings.ToLower(cleanName), ".mp4") {
+		cleanName += ".mp4"
+	}
+
+	var fileBuf [1024]uint16
+	nameUTF16, err := windows.UTF16FromString(cleanName)
+	if err == nil && len(nameUTF16) < len(fileBuf) {
+		copy(fileBuf[:], nameUTF16)
+	}
+
+	filterUTF16 := []uint16{
+		'M', 'P', '4', ' ', 0x89c6, 0x9891, 0x6587, 0x4ef6, ' ', '(', '*', '.', 'm', 'p', '4', ')', 0,
+		'*', '.', 'm', 'p', '4', 0,
+		0x6240, 0x6709, 0x6587, 0x4ef6, ' ', '(', '*', '.', '*', ')', 0,
+		'*', '.', '*', 0,
+		0,
+	}
+	titlePtr, _ := windows.UTF16PtrFromString("导出 1080P 监控录像分片 (MP4)")
+	defExtPtr, _ := windows.UTF16PtrFromString("mp4")
+
+	var initDirPtr *uint16
+	cleanInit := strings.TrimSpace(initialDir)
+	if cleanInit == "" {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			dl := filepath.Join(home, "Downloads")
+			if st, err := os.Stat(dl); err == nil && st.IsDir() {
+				cleanInit = dl
+			} else {
+				cleanInit = home
+			}
+		}
+	}
+	if cleanInit != "" {
+		if abs, err := filepath.Abs(cleanInit); err == nil {
+			if st, err := os.Stat(abs); err == nil && st.IsDir() {
+				initDirPtr, _ = windows.UTF16PtrFromString(abs)
+			}
+		}
+	}
+
+	ofn := openFileNameW{
+		LStructSize:     uint32(unsafe.Sizeof(openFileNameW{})),
+		HwndOwner:       ownerHWND,
+		LpstrFilter:     &filterUTF16[0],
+		NFilterIndex:    1,
+		LpstrFile:       &fileBuf[0],
+		NMaxFile:        uint32(len(fileBuf)),
+		LpstrInitialDir: initDirPtr,
+		LpstrTitle:      titlePtr,
+		// OFN_OVERWRITEPROMPT (0x02) | OFN_NOCHANGEDIR (0x08) | OFN_PATHMUSTEXIST (0x0800) | OFN_EXPLORER (0x080000)
+		Flags:       0x0008080A,
+		LpstrDefExt: defExtPtr,
+	}
+
+	ok, _, _ := procGetSaveFileNameW.Call(uintptr(unsafe.Pointer(&ofn)))
+	if ok == 0 {
+		// Check if GetSaveFileNameW failed due to invalid initial filename/dir rather than user cancellation
+		if extErr, _, _ := procCommDlgExtendedError.Call(); extErr != 0 {
+			fileBuf = [1024]uint16{}
+			if fallbackUTF16, err := windows.UTF16FromString("recording.mp4"); err == nil {
+				copy(fileBuf[:], fallbackUTF16)
+			}
+			ofn.LpstrInitialDir = nil
+			ok, _, _ = procGetSaveFileNameW.Call(uintptr(unsafe.Pointer(&ofn)))
+		}
+		if ok == 0 {
+			return "", true, nil
+		}
+	}
+	selected := strings.TrimSpace(windows.UTF16ToString(fileBuf[:]))
+	if selected == "" {
+		return "", true, nil
+	}
+	if !strings.HasSuffix(strings.ToLower(selected), ".mp4") {
+		selected += ".mp4"
+	}
+	return selected, false, nil
+}
+
+func selectNativeExportFile(defaultFileName string, initialDir string) (string, bool, error) {
+	winWindowMu.Lock()
+	w := activeWebView
+	hwnd := activeMainHWND
+	winWindowMu.Unlock()
+
+	type pickResult struct {
+		path      string
+		cancelled bool
+		err       error
+	}
+
+	if w != nil && hwnd != 0 {
+		ch := make(chan pickResult, 1)
+		w.Dispatch(func() {
+			p, c, err := showWin32SaveFilePicker(hwnd, defaultFileName, initialDir)
+			ch <- pickResult{path: p, cancelled: c, err: err}
+		})
+		res := <-ch
+		return res.path, res.cancelled, res.err
+	}
+
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	_, _, _ = procCoInitializeEx.Call(0, 2 /* COINIT_APARTMENTTHREADED */)
+	return showWin32SaveFilePicker(0, defaultFileName, initialDir)
 }
 
 func resolveInitialWindowBounds(logicalW, logicalH int) (width, height, minW, minH int) {

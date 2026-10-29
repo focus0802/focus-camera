@@ -21,8 +21,14 @@
 /* On phone widths the calendar matches the field instead of running past the screen edge, and a tighter inset keeps the month and its controls on one row. */
 @media (max-width: 360px) { .popover { right: 0; width: auto; padding: 12px; } }
 .footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 14px; border-top: 1px solid var(--border-subtle); padding-top: 11px; color: var(--text-muted); font-size: var(--text-xs); }
+.footerLeft { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.legend { display: inline-flex; align-items: center; gap: 7px; padding-left: 6px; border-left: 1px solid var(--border-subtle); color: var(--text-muted); font-size: 11px; white-space: nowrap; }
+.legendItem { display: inline-flex; align-items: center; gap: 3.5px; }
+.legendDotAuto, .legendDotManual { width: 5px; height: 5px; border-radius: 50%; display: inline-block; }
+.legendDotAuto { background: var(--success, #10b981); }
+.legendDotManual { background: var(--danger, #f43f5e); }
 /* Old and new status lines share one cell, pinned to the trailing edge so a shorter line never shifts. */
-.status { display: grid; min-width: 0; justify-items: end; }
+.status { display: grid; min-width: 0; justify-items: end; font-variant-numeric: tabular-nums; }
 .status > span { grid-area: 1 / 1; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .footer button { border: 0; border-radius: var(--radius-control); padding: 4px 8px; background: transparent; color: var(--text-secondary); font: inherit; cursor: pointer; transition: background-color var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard), transform var(--duration-spring) var(--ease-spring); }
 @media (hover: hover) and (pointer: fine) { .footer button:hover:not(:disabled) { background: var(--surface-muted); color: var(--foreground); } }

@@ -134,10 +134,20 @@ export interface SegmentFile {
   active?: boolean;
 }
 
+export interface DateSummary {
+  date: string;
+  segment_count: number;
+  auto_count: number;
+  manual_count: number;
+  active: boolean;
+  total_bytes: number;
+}
+
 export interface RecordingsPayload {
   config: RecordingConfig;
   states: RecordingState[];
   dates: string[];
+  date_summaries?: Record<string, DateSummary>;
   segments: SegmentFile[];
   total_bytes: number;
   segment_count: number;

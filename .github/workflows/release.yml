@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release tag version (e.g. v2.3.1)"
+        description: "Release tag version (e.g. v2.4.0)"
         required: true
-        default: "v2.3.1"
+        default: "v2.4.0"
 
 permissions:
   contents: write
@@ -82,7 +82,7 @@ jobs:
           {
             "version": "${RELEASE_VERSION}",
             "published_at": "${PUB_DATE}",
-            "notes": "FocusCamera ${RELEASE_VERSION} 桌面端顶栏自由拖动与工作区固定尺寸优化版：\n1. 恢复顶栏自由拖动窗口：保持窗口固定为桌面工作区尺寸（不可缩放/调整大小），同时支持按住顶部导航栏自由拖动窗口（适配多显示器移动场景）\n2. 沉浸式大屏模式与浮动控制抽屉：支持一键进入 100% 满屏沉浸监控墙模式、鼠标触顶呼出顶栏、快捷键快速切换宫格与全局命令面板 (⌘K / /)\n3. 系统设置中心与开机静默自启：统一管理双平台开机自启、录像存储目录原生选择、循环覆盖与定时录像策略",
+            "notes": "FocusCamera ${RELEASE_VERSION} 录像日历智能标注与原生导出增强版：\n1. 回放日历多状态圆点标注：区分自动录像（翠绿点）与手动录制（珊瑚红点），无录像日期智能置灰，支持按机位实时过滤可用日期与段数提示\n2. 原生 MP4 导出位置选择器：macOS / Windows 调用系统原生保存对话框自由选择导出目录与文件名，支持本地高速直拷与一键在文件夹中定位\n3. 顶栏零跳动三栏布局：大屏搜索、布局与沉浸按钮左移固定，切换视图时中央导航页签绝对居中不跳动\n4. 磁盘配额智能收敛与断电重连优化：修复后台轮询重置配额问题，优化多设备断电场景下 RTSP 握手并发效率",
             "assets": {
               "darwin_arm64": {
                 "url": "FocusCamera-Mac",

@@ -14,6 +14,7 @@ import {
   Video,
 } from "lucide-react";
 import type { Camera, RecordingsPayload, SegmentFile } from "../types";
+import type { CalendarDayMarker } from "./arc/calendar/calendar";
 import { DatePicker } from "./arc/date-picker/date-picker";
 import SegmentedControl from "./arc/segmented-control/segmented-control";
 import {
@@ -30,6 +31,7 @@ import {
   type SortState,
 } from "./arc/sortable-data-table/sortable-data-table";
 import { Pagination } from "./arc/pagination/pagination";
+import { Alert } from "./arc/alert/alert";
 import { Badge } from "./arc/badge/badge";
 import { Button } from "./arc/button/button";
 import { Dialog, DialogContent } from "./arc/dialog/dialog";
@@ -121,6 +123,12 @@ export function PlaybackView({
   const [pageSize, setPageSize] = useState<number>(50);
   const [pendingDeleteSeg, setPendingDeleteSeg] = useState<SegmentFile | null>(null);
   const [deletingSeg, setDeletingSeg] = useState<boolean>(false);
+  const [exportingRelPath, setExportingRelPath] = useState<string | null>(null);
+  const [exportNotice, setExportNotice] = useState<{
+    tone: "success" | "danger";
+    title: string;
+    savedPath?: string;
+  } | null>(null);
 
   const segments = useMemo(() => {
     const raw = payload?.segments ?? [];
@@ -234,6 +242,56 @@ export function PlaybackView({
 
   const availableDates = payload?.dates ?? [];
 
+  const calendarDayMarkers = useMemo<Record<string, CalendarDayMarker>>(() => {
+    const map: Record<string, CalendarDayMarker> = {};
+    const summaries = payload?.date_summaries;
+    if (summaries && Object.keys(summaries).length > 0) {
+      for (const [d, ds] of Object.entries(summaries)) {
+        if (!ds || ds.segment_count <= 0) continue;
+        const tone: CalendarDayMarker["tone"] =
+          ds.manual_count > 0 && ds.auto_count > 0
+            ? "both"
+            : ds.manual_count > 0
+              ? "manual"
+              : "auto";
+        const modeDesc =
+          ds.manual_count > 0 && ds.auto_count > 0
+            ? `自动 ${ds.auto_count} / 手动 ${ds.manual_count}`
+            : ds.manual_count > 0
+              ? `手动 ${ds.manual_count} 段`
+              : `自动 ${ds.auto_count} 段`;
+        const activeTag = ds.active ? " · 正在录制" : "";
+        map[d] = {
+          tone,
+          active: ds.active,
+          count: ds.segment_count,
+          tooltip: `${d} · 共 ${ds.segment_count} 段录像 (${modeDesc} · ${formatBytes(ds.total_bytes)})${activeTag}`,
+        };
+      }
+      return map;
+    }
+    for (const d of availableDates) {
+      map[d] = {
+        tone: "auto",
+        count: 1,
+        tooltip: `${d} · 有录像分片`,
+      };
+    }
+    return map;
+  }, [payload?.date_summaries, availableDates]);
+
+  const maxSelectableDate = useMemo(() => new Date(), []);
+
+  const isCalendarDateDisabled = useMemo(
+    () => (date: Date) => {
+      const ymd = toYMD(date);
+      if (selectedDate && ymd === selectedDate) return false;
+      if (availableDates.length === 0) return false;
+      return !calendarDayMarkers[ymd];
+    },
+    [selectedDate, availableDates.length, calendarDayMarkers]
+  );
+
   // Scope the timeline to the active segment's date & camera (or selected filters)
   const timelineDate = useMemo(() => {
     if (selectedDate) return selectedDate;
@@ -309,6 +367,78 @@ export function PlaybackView({
     }
   }
 
+  async function handleExportSegment(seg: SegmentFile) {
+    if (exportingRelPath) return;
+    setExportingRelPath(seg.rel_path);
+    try {
+      const safeTime = seg.start_time.replace(/:/g, "");
+      const suggestedName = `${seg.camera_name}_${seg.date}_${safeTime}.mp4`;
+      const res = await fetch("/api/recordings/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          path: seg.rel_path,
+          suggested_name: suggestedName,
+        }),
+      });
+      const rawText = await res.text();
+      let data: {
+        ok?: boolean;
+        cancelled?: boolean;
+        path?: string;
+        error?: string;
+      } = {};
+      try {
+        data = JSON.parse(rawText) as typeof data;
+      } catch {
+        if (res.status === 404) {
+          setExportNotice({
+            tone: "danger",
+            title: "导出失败：当前运行的客户端程序尚未包含新版导出接口，请重启 FocusCamera 客户端后再试",
+          });
+          return;
+        }
+        setExportNotice({
+          tone: "danger",
+          title: `导出失败：服务端返回异常响应 (${res.status})`,
+        });
+        return;
+      }
+      if (!res.ok || !data.ok) {
+        setExportNotice({
+          tone: "danger",
+          title: `导出失败：${data.error || "无法写入目标文件"}`,
+        });
+        return;
+      }
+      if (data.cancelled) {
+        return;
+      }
+      if (data.path) {
+        setExportNotice({
+          tone: "success",
+          title: `已导出 MP4 至：${data.path}`,
+          savedPath: data.path,
+        });
+      }
+    } catch (err) {
+      setExportNotice({
+        tone: "danger",
+        title: `导出失败：${err instanceof Error ? err.message : "网络请求异常"}`,
+      });
+    } finally {
+      setExportingRelPath(null);
+    }
+  }
+
+  async function handleRevealExportedFile(filePath: string) {
+    await fetch("/api/recordings/open-folder", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ select_file: filePath }),
+    });
+  }
+
   const columns: DataColumn<TableRowItem>[] = [
     {
       key: "camera_name",
@@ -370,9 +500,7 @@ export function PlaybackView({
       width: "30%",
       render: (_val, row) => {
         const isCurrent = activeSegment?.rel_path === row.rel_path;
-        const downloadUrl = `/api/recordings/file?path=${encodeURIComponent(
-          row.rel_path
-        )}&download=1`;
+        const isExporting = exportingRelPath === row.rel_path;
         const rowDesc = `${row.camera_name} ${row.date} ${row.start_time}`;
         return (
           <div className="table-actions">
@@ -387,16 +515,17 @@ export function PlaybackView({
               <Play size={12} />
               <span>{isCurrent ? "当前" : "回放"}</span>
             </button>
-            <a
-              href={downloadUrl}
-              download
+            <button
+              type="button"
               className="table-action-btn"
+              disabled={Boolean(exportingRelPath)}
+              onClick={() => void handleExportSegment(row)}
               aria-label={`导出 ${rowDesc} MP4`}
-              title="下载标准 1080P MP4 录像文件"
+              title="选择目标文件夹导出标准 1080P MP4 录像文件"
             >
               <Download size={12} />
-              <span>导出</span>
-            </a>
+              <span>{isExporting ? "导出中…" : "导出"}</span>
+            </button>
             <button
               type="button"
               className="table-action-btn table-action-btn--danger"
@@ -463,6 +592,10 @@ export function PlaybackView({
                   label="日期"
                   locale="zh-CN"
                   showToday
+                  showMarkerLegend
+                  maxDate={maxSelectableDate}
+                  disabledDates={isCalendarDateDisabled}
+                  dayMarkers={calendarDayMarkers}
                   value={parseYMD(selectedDate)}
                   onChange={(date) => {
                     onSelectDate(date ? toYMD(date) : "");
@@ -484,6 +617,7 @@ export function PlaybackView({
                     <button
                       key={d}
                       type="button"
+                      title={calendarDayMarkers[d]?.tooltip || d}
                       className={`date-pill ${selectedDate === d ? "date-pill--active" : ""}`}
                       onClick={() => onSelectDate(d)}
                     >
@@ -572,6 +706,28 @@ export function PlaybackView({
           </div>
         </div>
       </section>
+
+      {exportNotice && (
+        <Alert
+          open={Boolean(exportNotice)}
+          tone={exportNotice.tone}
+          title={exportNotice.title}
+          onDismiss={() => setExportNotice(null)}
+        >
+          {exportNotice.savedPath ? (
+            <span className="export-alert-actions">
+              <button
+                type="button"
+                className="table-action-btn"
+                onClick={() => void handleRevealExportedFile(exportNotice.savedPath!)}
+              >
+                <FolderOpen size={12} />
+                <span>在文件夹中显示</span>
+              </button>
+            </span>
+          ) : undefined}
+        </Alert>
+      )}
 
       {/* Main Playback Split: Left (1080P Player + Smart Timeline + Controls) | Right (Full-Height Scrollable Paged Table) */}
       {segments.length === 0 && !keyword && modeFilter === "all" ? (
@@ -767,16 +923,18 @@ export function PlaybackView({
               </div>
 
               {activeSegment && (
-                <a
-                  href={`/api/recordings/file?path=${encodeURIComponent(
-                    activeSegment.rel_path
-                  )}&download=1`}
-                  download
+                <button
+                  type="button"
+                  disabled={Boolean(exportingRelPath)}
+                  onClick={() => void handleExportSegment(activeSegment)}
                   className="export-mp4-link"
+                  title="选择文件夹并导出当前 1080P MP4 录像分片"
                 >
                   <Download size={14} />
-                  <span>导出 MP4</span>
-                </a>
+                  <span>
+                    {exportingRelPath === activeSegment.rel_path ? "正在导出…" : "导出 MP4"}
+                  </span>
+                </button>
               )}
             </div>
           </section>

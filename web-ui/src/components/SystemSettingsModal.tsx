@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Clock,
   Download,
@@ -87,11 +87,31 @@ export function SystemSettingsModal({
   const [savingCfg, setSavingCfg] = useState<boolean>(false);
   const [selectingFolder, setSelectingFolder] = useState<boolean>(false);
   const [diskInfo, setDiskInfo] = useState<DiskSpaceInfo | null>(null);
-  const [policySavedMsg, setPolicySavedMsg] = useState<string | null>(null);
+  const [policySavedMsg, setPolicySavedMsg] = useState<{
+    ok: boolean;
+    text: string;
+  } | null>(null);
+  const wasOpenRef = useRef<boolean>(false);
 
+  // Sync cfgForm only when modal transitions from closed -> open (or while closed),
+  // preventing the 4-second background /api/recordings poll from resetting user edits or disk quota clamping.
   useEffect(() => {
-    setCfgForm(recordingConfig);
-  }, [recordingConfig]);
+    if (open && !wasOpenRef.current) {
+      const nextForm = { ...recordingConfig };
+      if (
+        diskInfo &&
+        diskInfo.max_quota_gb > 0 &&
+        nextForm.max_storage_gb > diskInfo.max_quota_gb
+      ) {
+        nextForm.max_storage_gb =
+          diskInfo.recommended_quota_gb || diskInfo.max_quota_gb;
+      }
+      setCfgForm(nextForm);
+    } else if (!open) {
+      setCfgForm(recordingConfig);
+    }
+    wasOpenRef.current = open;
+  }, [open, recordingConfig, diskInfo]);
 
   const fetchAutoStartStatus = useCallback(async () => {
     try {
@@ -116,7 +136,7 @@ export function SystemSettingsModal({
   }, [open, fetchAutoStartStatus]);
 
   useEffect(() => {
-    if (!open || activeTab !== "recording") return;
+    if (!open) return;
     let cancelled = false;
     const timer = window.setTimeout(async () => {
       try {
@@ -142,7 +162,7 @@ export function SystemSettingsModal({
       } catch {
         // ignore transient probe errors
       }
-    }, 120);
+    }, 60);
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
@@ -238,7 +258,12 @@ export function SystemSettingsModal({
     setPolicySavedMsg(null);
     try {
       await onSaveRecordingSettings(cfgForm);
-      setPolicySavedMsg("设置已保存");
+      setPolicySavedMsg({ ok: true, text: "设置已保存" });
+    } catch (err) {
+      setPolicySavedMsg({
+        ok: false,
+        text: `保存失败：${err instanceof Error ? err.message : "请检查配置文件写入权限"}`,
+      });
     } finally {
       setSavingCfg(false);
     }
@@ -534,8 +559,8 @@ export function SystemSettingsModal({
 
                   {policySavedMsg && (
                     <Alert
-                      tone="success"
-                      title={policySavedMsg}
+                      tone={policySavedMsg.ok ? "success" : "danger"}
+                      title={policySavedMsg.text}
                       onDismiss={() => setPolicySavedMsg(null)}
                     />
                   )}
@@ -559,7 +584,7 @@ export function SystemSettingsModal({
                 <div className="modal-form-stack">
                   <div className="update-meta-strip">
                     <Badge tone="neutral" size="sm">
-                      当前版本 {updateStatus?.current_version || "v2.3.1"}
+                      当前版本 {updateStatus?.current_version || "v2.4.0"}
                     </Badge>
                     {updateStatus?.os_arch && (
                       <Badge tone="neutral" size="sm">

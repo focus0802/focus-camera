@@ -14,3 +14,7 @@ func runNativeDesktopWindow(appURL string, startInTray bool) {
 func selectNativeStorageFolder(initialDir string) (string, bool, error) {
 	return "", true, nil
 }
+
+func selectNativeExportFile(defaultFileName string, initialDir string) (string, bool, error) {
+	return "", true, nil
+}

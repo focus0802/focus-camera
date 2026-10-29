@@ -11,6 +11,17 @@ import styles from "./calendar.module.css";
 
 export type CalendarDateMatcher = (date: Date) => boolean;
 
+export interface CalendarDayMarker {
+  /** Recording/event indicator tone: "auto" (green), "manual" (coral red), or "both" (dual dots). */
+  tone?: "auto" | "manual" | "both";
+  /** Whether recording is currently active on this day. */
+  active?: boolean;
+  /** Number of segments or items on this day. */
+  count?: number;
+  /** Optional tooltip text shown on hover and read by screen readers. */
+  tooltip?: string;
+}
+
 export interface CalendarProps {
   value?: Date;
   onChange?: (date: Date) => void;
@@ -19,6 +30,8 @@ export interface CalendarProps {
   minDate?: Date;
   maxDate?: Date;
   disabledDates?: CalendarDateMatcher;
+  /** Optional map (keyed by YYYY-MM-DD) or callback returning marker metadata for dates with recordings/events. */
+  dayMarkers?: Record<string, CalendarDayMarker> | ((date: Date, key: string) => CalendarDayMarker | undefined);
   locale?: string;
   className?: string;
   /** Adds a Today button that slides back to the current month and selects today when it is available. */
@@ -110,6 +123,7 @@ export function Calendar({
   minDate,
   maxDate,
   disabledDates,
+  dayMarkers,
   locale = "en-US",
   className,
   showToday = false,
@@ -265,22 +279,40 @@ export function Calendar({
         const key = dateKey(date);
         const selected = sameDay(date, value);
         const isToday = sameDay(date, today);
+        const marker = typeof dayMarkers === "function" ? dayMarkers(date, key) : dayMarkers?.[key];
+        const hasMarker = Boolean(marker && (marker.count === undefined || marker.count > 0));
+        const baseLabel = date.toLocaleDateString(locale, { dateStyle: "full" });
+        const ariaLabel = hasMarker && marker?.tooltip ? `${baseLabel} (${marker.tooltip})` : baseLabel;
         return <button
           key={key}
           type="button"
           role="gridcell"
           data-date={key}
-          aria-label={date.toLocaleDateString(locale, { dateStyle: "full" })}
+          data-has-marker={hasMarker ? "true" : undefined}
+          title={hasMarker ? marker?.tooltip : undefined}
+          aria-label={ariaLabel}
           aria-selected={selected}
           aria-current={isToday ? "date" : undefined}
           tabIndex={present && key === tabbableKey ? 0 : -1}
           disabled={isDisabled(date)}
           style={present ? numberDelay(key) : undefined}
-          className={cx(styles.day, !sameMonth(date, paneMonth) && styles.outside, selected && styles.selected, isToday && styles.today)}
+          className={cx(styles.day, !sameMonth(date, paneMonth) && styles.outside, selected && styles.selected, isToday && styles.today, hasMarker && styles.hasMarker)}
           onFocus={() => setFocusedDate(date)}
           onKeyDown={(event) => onDayKeyDown(event, date)}
           onClick={() => onChange?.(date)}
-        ><span className={styles.dayNumber}>{date.getDate()}</span></button>;
+        >
+          <span className={styles.dayNumber}>{date.getDate()}</span>
+          {hasMarker && (
+            <span className={styles.markerRow} aria-hidden="true">
+              {(marker?.tone === "auto" || marker?.tone === "both" || !marker?.tone) && (
+                <i className={cx(styles.markerDot, styles.markerAuto, marker?.active && styles.markerActive)} />
+              )}
+              {(marker?.tone === "manual" || marker?.tone === "both") && (
+                <i className={cx(styles.markerDot, styles.markerManual, marker?.tone === "manual" && marker?.active && styles.markerActive)} />
+              )}
+            </span>
+          )}
+        </button>;
       })}
     </div>)}
     </div>

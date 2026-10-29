@@ -38,13 +38,21 @@
 /* Outside days dim their number, not the button, so a disc gliding onto one keeps its full strength. */
 .day.outside { color: var(--text-muted); }
 .day.outside:not(.selected) .dayNumber { opacity: .8; }
-/* Today is a small dot under the number. It takes the number's color, so it flips with it when the disc arrives. */
-.day.today .dayNumber::after { content: ""; position: absolute; top: calc(100% + 4px); left: 50%; width: 4px; height: 4px; margin-left: -2px; border-radius: 50%; background: currentColor; }
-.day.selected, .day.today { font-weight: 500; }
+/* Today gets a subtle inset ring so it never collides with bottom recording/event indicator dots. */
+.day.today:not(.selected)::before { box-shadow: inset 0 0 0 1px var(--border-strong); background: color-mix(in srgb, var(--foreground) 4%, transparent); }
+.day.selected, .day.today, .day.hasMarker { font-weight: 500; }
+.day.hasMarker .dayNumber { transform: translateY(-1.5px); }
 .day.selected { color: var(--accent-foreground); }
+.markerRow { position: absolute; bottom: 4.5px; left: 50%; transform: translateX(-50%); display: inline-flex; align-items: center; gap: 2.5px; pointer-events: none; z-index: 1; }
+.markerDot { width: 4px; height: 4px; border-radius: 50%; display: block; transition: background-color var(--duration-fast) var(--ease-standard), box-shadow var(--duration-fast) var(--ease-standard); }
+.markerAuto { background: var(--success, #10b981); }
+.markerManual { background: var(--danger, #f43f5e); }
+.markerActive { box-shadow: 0 0 0 2px color-mix(in srgb, var(--success, #10b981) 30%, transparent); }
+.day.selected .markerAuto { background: #ffffff; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.16); }
+.day.selected .markerManual { background: #fecdd3; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.22); }
 .day:disabled { cursor: default; color: var(--text-muted); }
-.day:disabled .dayNumber { opacity: .42; }
-.day.outside:disabled .dayNumber { opacity: .3; }
+.day:disabled .dayNumber { opacity: .38; }
+.day.outside:disabled .dayNumber { opacity: .26; }
 @media (prefers-reduced-motion: reduce) {
   .navButton, .todayButton, .day, .day::before, .dayNumber, .highlightFill { transition: none; }
   .navButton:active, .todayButton:active, .day:active::before, .monthBody:has(.day.selected:active) .highlightFill, .day:active .dayNumber { scale: none; }

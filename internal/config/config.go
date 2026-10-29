@@ -323,13 +323,19 @@ func (s *Store) save() error {
 		return err
 	}
 	tmpPath := s.filePath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0o644); err == nil {
+	if err := os.WriteFile(tmpPath, data, 0o666); err == nil {
+		if err := os.Rename(tmpPath, s.filePath); err == nil {
+			return nil
+		}
+		_ = os.Chmod(s.filePath, 0o666)
+		_ = os.Remove(s.filePath)
 		if err := os.Rename(tmpPath, s.filePath); err == nil {
 			return nil
 		}
 		_ = os.Remove(tmpPath)
 	}
-	return os.WriteFile(s.filePath, data, 0o644)
+	_ = os.Chmod(s.filePath, 0o666)
+	return os.WriteFile(s.filePath, data, 0o666)
 }
 
 func (s *Store) GetConfig() AppConfig {
@@ -611,10 +617,20 @@ func (s *Store) UpdateAppSettings(defaultUser, defaultPass, subnet string, rec R
 	if strings.TrimSpace(defaultUser) != "" {
 		s.cfg.DefaultUsername = strings.TrimSpace(defaultUser)
 	}
-	s.cfg.DefaultPassword = defaultPass
+	if defaultPass != "" {
+		s.cfg.DefaultPassword = defaultPass
+	}
 	if strings.TrimSpace(subnet) != "" {
 		s.cfg.SubnetPrefix = strings.TrimSuffix(strings.TrimSpace(subnet), ".")
 	}
+	normalizeRecordingConfig(&rec, filepath.Dir(s.filePath))
+	s.cfg.Recording = rec
+	return s.save()
+}
+
+func (s *Store) SetRecordingConfig(rec RecordingConfig) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	normalizeRecordingConfig(&rec, filepath.Dir(s.filePath))
 	s.cfg.Recording = rec
 	return s.save()
