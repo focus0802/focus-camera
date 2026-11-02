@@ -43,6 +43,7 @@ import { Pagination } from "./arc/pagination/pagination";
 
 interface DeviceManagerViewProps {
   cameras: Camera[];
+  onlineMap?: Record<string, boolean>;
   recordingStates: Record<string, RecordingState>;
   recordingConfig: RecordingConfig;
   defaultSubnet: string;
@@ -69,6 +70,7 @@ interface EditableDiscovered extends DiscoveredCamera {
   authOk: boolean;
   probing?: boolean;
   changingIP?: boolean;
+  addingRow?: boolean;
   ipChangedFrom?: string;
   probeError?: string;
   autoRecord: boolean;
@@ -76,6 +78,7 @@ interface EditableDiscovered extends DiscoveredCamera {
 
 type CameraRowItem = Camera & {
   order_index: number;
+  vendor_sort: string;
   rec_status_sort: number;
   auto_record_num: number;
 } & Record<string, unknown>;
@@ -86,6 +89,22 @@ const zhNumericCollator = new Intl.Collator("zh-CN", {
   numeric: true,
   sensitivity: "base",
 });
+
+function isValidIPv4(ip?: string): boolean {
+  const trimmed = (ip || "").trim();
+  const parts = trimmed.split(".");
+  if (parts.length !== 4) return false;
+  return parts.every((p) => {
+    if (!/^\d{1,3}$/.test(p)) return false;
+    const n = Number(p);
+    return n >= 0 && n <= 255 && String(n) === p;
+  });
+}
+
+function isPlaceholderCameraName(name?: string): boolean {
+  const trimmed = (name || "").trim();
+  return !trimmed || trimmed.startsWith("摄像头 (");
+}
 
 function formatBytes(bytes?: number): string {
   if (!bytes || bytes <= 0) return "0 MB";
@@ -111,6 +130,7 @@ function inferGatewayFromIP(ip?: string): string {
 
 export function DeviceManagerView({
   cameras,
+  onlineMap,
   recordingStates,
   recordingConfig,
   defaultSubnet,
@@ -130,6 +150,10 @@ export function DeviceManagerView({
   const [subnet, setSubnet] = useState<string>(defaultSubnet || "192.168.1");
   const [scanUser, setScanUser] = useState<string>(defaultUsername || "admin");
   const [scanPassword, setScanPassword] = useState<string>(defaultPassword || "");
+
+  useEffect(() => {
+    if (defaultSubnet) setSubnet(defaultSubnet);
+  }, [defaultSubnet]);
 
   useEffect(() => {
     if (defaultUsername) setScanUser(defaultUsername);
@@ -162,7 +186,7 @@ export function DeviceManagerView({
   const [editingCam, setEditingCam] = useState<Partial<Camera> | null>(null);
   const [isEditMode, setIsEditMode] = useState<boolean>(false);
   const [originalIP, setOriginalIP] = useState<string>("");
-  const [syncHardwareIP, setSyncHardwareIP] = useState<boolean>(true);
+  const [syncHardwareIP, setSyncHardwareIP] = useState<boolean>(false);
   const [hwNetmask, setHwNetmask] = useState<string>("255.255.255.0");
   const [hwGateway, setHwGateway] = useState<string>("192.168.1.1");
   const [hwNetInfo, setHwNetInfo] = useState<CameraNetworkConfig | null>(null);
@@ -194,6 +218,12 @@ export function DeviceManagerView({
     return Array.from(set);
   }, [cameras]);
 
+  useEffect(() => {
+    if (groupFilter !== "all" && !availableGroups.includes(groupFilter)) {
+      setGroupFilter("all");
+    }
+  }, [groupFilter, availableGroups]);
+
   async function handleRunScan(e?: React.FormEvent) {
     e?.preventDefault();
     setScanning(true);
@@ -224,7 +254,7 @@ export function DeviceManagerView({
         editPassword: item.password ?? (item.no_password ? "" : scanPassword),
         noPassword: Boolean(item.no_password),
         authOk: Boolean(item.auth_ok),
-        autoRecord: false,
+        autoRecord: Boolean(item.auto_record),
       }));
       setScanItems(mapped);
 
@@ -299,25 +329,34 @@ export function DeviceManagerView({
         return;
       }
       setScanItems((prev) =>
-        prev.map((row, i) =>
-          i === idx
-            ? {
-                ...row,
-                probing: false,
-                authOk: true,
-                probeError: undefined,
-                editPassword: data.password ?? pwdToTry,
-                noPassword: Boolean(data.no_password),
-                editName: data.suggested_name || row.editName,
-                editGroup: data.suggested_group || row.editGroup,
-                device_model: data.device_model || row.device_model,
-                vendor: data.camera?.vendor || row.vendor,
-                main_stream_path: data.camera?.main_stream_path || row.main_stream_path,
-                sub_stream_path: data.camera?.sub_stream_path || row.sub_stream_path,
-                supports_talk: data.camera?.supports_talk ?? row.supports_talk,
-              }
-            : row
-        )
+        prev.map((row, i) => {
+          if (i !== idx) return row;
+          const nextName =
+            !isPlaceholderCameraName(data.suggested_name) ||
+            isPlaceholderCameraName(row.editName)
+              ? data.suggested_name || row.editName
+              : row.editName;
+          const nextGroup =
+            (data.suggested_group && data.suggested_group !== DEFAULT_GROUP) ||
+            !row.editGroup.trim()
+              ? data.suggested_group || row.editGroup || DEFAULT_GROUP
+              : row.editGroup;
+          return {
+            ...row,
+            probing: false,
+            authOk: true,
+            probeError: undefined,
+            editPassword: data.password ?? pwdToTry,
+            noPassword: Boolean(data.no_password),
+            editName: nextName,
+            editGroup: nextGroup,
+            device_model: data.device_model || row.device_model,
+            vendor: data.camera?.vendor || row.vendor,
+            main_stream_path: data.camera?.main_stream_path || row.main_stream_path,
+            sub_stream_path: data.camera?.sub_stream_path || row.sub_stream_path,
+            supports_talk: data.camera?.supports_talk ?? row.supports_talk,
+          };
+        })
       );
     } catch {
       setScanItems((prev) =>
@@ -333,6 +372,14 @@ export function DeviceManagerView({
     if (!target) return;
     const nextIP = target.editIP.trim();
     if (!nextIP || nextIP === target.ip) return;
+    if (!isValidIPv4(nextIP)) {
+      setScanItems((prev) =>
+        prev.map((row, i) =>
+          i === idx ? { ...row, probeError: "IPv4 地址格式无效" } : row
+        )
+      );
+      return;
+    }
 
     const hasCustomPwd = target.editPassword !== "";
     const isExplicitEmpty = target.noPassword && !hasCustomPwd;
@@ -420,6 +467,146 @@ export function DeviceManagerView({
             : row
         )
       );
+    }
+  }
+
+  async function handleAddSingleScanRow(idx: number) {
+    const item = scanItems[idx];
+    if (!item || item.addingRow || item.changingIP) return;
+    const nextIP = item.editIP.trim() || item.ip;
+    if (!isValidIPv4(nextIP)) {
+      setScanItems((prev) =>
+        prev.map((row, i) =>
+          i === idx ? { ...row, probeError: "IPv4 地址格式无效" } : row
+        )
+      );
+      return;
+    }
+
+    setScanItems((prev) =>
+      prev.map((row, i) =>
+        i === idx ? { ...row, addingRow: true, probeError: undefined } : row
+      )
+    );
+    setBanner(null);
+
+    try {
+      const hasCustomPwd = item.editPassword !== "";
+      const isExplicitEmpty = item.noPassword && !hasCustomPwd;
+      const effPassword = hasCustomPwd
+        ? item.editPassword
+        : isExplicitEmpty
+          ? ""
+          : scanPassword;
+
+      let finalIP = item.ip;
+      let hardwareIPUpdated = false;
+      if (nextIP !== item.ip) {
+        const netRes = await fetch("/api/cameras/network", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            id: item.existing_id || undefined,
+            old_ip: item.ip,
+            new_ip: nextIP,
+            proto: "static",
+            netmask: "255.255.255.0",
+            gateway: inferGatewayFromIP(nextIP),
+            username: scanUser.trim() || "admin",
+            password: effPassword,
+            no_password: isExplicitEmpty,
+            update_store: Boolean(item.existing_id),
+          }),
+        });
+        const netData = await netRes.json();
+        if (!netRes.ok || !netData.ok) {
+          throw new Error(
+            `修改摄像头 ${item.ip} → ${nextIP} 硬件 IP 失败：${netData.error || "连接异常"}`
+          );
+        }
+        finalIP = netData.new_ip || nextIP;
+        hardwareIPUpdated = true;
+      }
+
+      const rawName = item.editName.trim() || item.suggested_name || finalIP;
+      const finalName =
+        rawName === `摄像头 (${item.ip})` && finalIP !== item.ip
+          ? `摄像头 (${finalIP})`
+          : rawName;
+
+      const payload = {
+        subnet_prefix: subnet.trim(),
+        username: scanUser.trim() || "admin",
+        password: scanPassword,
+        cameras: [
+          {
+            id: item.existing_id || undefined,
+            name: finalName,
+            ip: finalIP,
+            group: item.editGroup.trim() || DEFAULT_GROUP,
+            username: scanUser.trim() || "admin",
+            password: effPassword,
+            no_password: isExplicitEmpty,
+            vendor: item.vendor || undefined,
+            main_stream_path: item.main_stream_path || undefined,
+            sub_stream_path: item.sub_stream_path || undefined,
+            model: item.device_model || undefined,
+            supports_talk: item.supports_talk ?? item.talk_open,
+            rtsp_port: 554,
+            talk_port: item.talk_open ? 8800 : 0,
+            sub_stream: true,
+            auto_record: item.autoRecord,
+          },
+        ],
+      };
+
+      const res = await fetch("/api/cameras/batch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "单独入库失败");
+      }
+
+      await onScanCompleteAndAdded();
+      setScanItems((prev) =>
+        prev.map((row, i) =>
+          i === idx
+            ? {
+                ...row,
+                addingRow: false,
+                probeError: undefined,
+                ipChangedFrom: hardwareIPUpdated ? row.ip : row.ipChangedFrom,
+                ip: finalIP,
+                editIP: finalIP,
+                editName: finalName,
+                selected: false,
+                status: "existing",
+              }
+            : row
+        )
+      );
+      setBanner({
+        tone: "success",
+        title:
+          item.status === "new"
+            ? `已单独入库：「${finalName} (${finalIP})」`
+            : `已保存设备配置：「${finalName} (${finalIP})」`,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setScanItems((prev) =>
+        prev.map((row, i) =>
+          i === idx ? { ...row, addingRow: false, probeError: msg } : row
+        )
+      );
+      setBanner({
+        tone: "danger",
+        title: "单独入库失败",
+        detail: msg,
+      });
     }
   }
 
@@ -546,17 +733,24 @@ export function DeviceManagerView({
     }
   }
 
+  const hasKnownOnlineMap = Boolean(onlineMap && Object.keys(onlineMap).length > 0);
+
   const filteredCameras = useMemo<CameraRowItem[]>(() => {
     const q = searchQuery.trim().toLowerCase();
     return cameras
       .map((c, idx) => {
         const recState = recordingStates[c.id];
         const isRec = Boolean(recState?.active);
-        const hasErr = Boolean(recState?.last_error);
+        const isOfflineFromHub = hasKnownOnlineMap && onlineMap?.[c.id] === false && !isRec;
+        const hasErr = Boolean(recState?.last_error) || isOfflineFromHub;
+        const isOnline = Boolean(onlineMap?.[c.id]) || isRec;
+        const meta = getVendorMeta(c.vendor, c.model);
         return {
           ...c,
+          group: c.group || DEFAULT_GROUP,
           order_index: idx + 1,
-          rec_status_sort: isRec ? 2 : hasErr ? 1 : 0,
+          vendor_sort: meta.shortLabel,
+          rec_status_sort: isRec ? 3 : hasErr ? 2 : isOnline ? 1 : 0,
           auto_record_num: c.auto_record ? 1 : 0,
         };
       })
@@ -564,15 +758,18 @@ export function DeviceManagerView({
         if (groupFilter !== "all" && (c.group || DEFAULT_GROUP) !== groupFilter) return false;
         const recState = recordingStates[c.id];
         const isRec = Boolean(recState?.active);
+        const isOfflineFromHub = hasKnownOnlineMap && onlineMap?.[c.id] === false && !isRec;
+        const hasErr = Boolean(recState?.last_error) || isOfflineFromHub;
         if (statusFilter === "recording" && !isRec) return false;
-        if (statusFilter === "idle" && isRec) return false;
+        if (statusFilter === "error" && (isRec || !hasErr)) return false;
+        if (statusFilter === "idle" && (isRec || hasErr)) return false;
         if (q) {
           const hay = `${c.name} ${c.ip} ${c.group || ""}`.toLowerCase();
           if (!hay.includes(q)) return false;
         }
         return true;
       });
-  }, [cameras, recordingStates, groupFilter, statusFilter, searchQuery]);
+  }, [cameras, onlineMap, hasKnownOnlineMap, recordingStates, groupFilter, statusFilter, searchQuery]);
 
   const sortedCameras = useMemo<CameraRowItem[]>(() => {
     if (!sortState) return filteredCameras;
@@ -581,7 +778,9 @@ export function DeviceManagerView({
       .sort((a, b) => {
         const left = a.row[sortState.key];
         const right = b.row[sortState.key];
-        if (left == null || right == null) return a.index - b.index;
+        if (left == null && right == null) return a.index - b.index;
+        if (left == null) return 1;
+        if (right == null) return -1;
         const result =
           typeof left === "number" && typeof right === "number"
             ? left - right
@@ -640,6 +839,13 @@ export function DeviceManagerView({
         isEditMode && syncHardwareIP && originalIP
           ? originalIP
           : editingCam.ip.trim();
+      if (!isValidIPv4(targetProbeIP)) {
+        setModalProbeMsg({
+          ok: false,
+          text: "请输入合法的 IPv4 地址（例如 192.168.1.100）",
+        });
+        return;
+      }
       const res = await fetch("/api/discover/probe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -664,25 +870,34 @@ export function DeviceManagerView({
         });
         return;
       }
-      setEditingCam((prev) =>
-        prev
-          ? {
-              ...prev,
-              name: data.suggested_name || prev.name,
-              group: data.suggested_group || prev.group || DEFAULT_GROUP,
-              password: data.password ?? prev.password,
-              no_password: Boolean(data.no_password),
-              model: data.device_model || prev.model,
-              vendor: data.camera?.vendor || prev.vendor || "tplink",
-              main_stream_path:
-                data.camera?.main_stream_path || prev.main_stream_path,
-              sub_stream_path:
-                data.camera?.sub_stream_path || prev.sub_stream_path,
-              supports_talk:
-                data.camera?.supports_talk ?? prev.supports_talk,
-            }
-          : prev
-      );
+      setEditingCam((prev) => {
+        if (!prev) return prev;
+        const nextName =
+          !isPlaceholderCameraName(data.suggested_name) ||
+          isPlaceholderCameraName(prev.name)
+            ? data.suggested_name || prev.name
+            : prev.name;
+        const nextGroup =
+          (data.suggested_group && data.suggested_group !== DEFAULT_GROUP) ||
+          !prev.group?.trim()
+            ? data.suggested_group || prev.group || DEFAULT_GROUP
+            : prev.group;
+        return {
+          ...prev,
+          name: nextName,
+          group: nextGroup,
+          password: data.password ?? prev.password,
+          no_password: Boolean(data.no_password),
+          model: data.device_model || prev.model,
+          vendor: data.camera?.vendor || prev.vendor || "tplink",
+          main_stream_path:
+            data.camera?.main_stream_path || prev.main_stream_path,
+          sub_stream_path:
+            data.camera?.sub_stream_path || prev.sub_stream_path,
+          supports_talk:
+            data.camera?.supports_talk ?? prev.supports_talk,
+        };
+      });
       void fetchCameraHardwareNetwork(
         editingCam.id,
         targetProbeIP,
@@ -707,6 +922,13 @@ export function DeviceManagerView({
     e.preventDefault();
     if (!editingCam || !editingCam.ip?.trim()) return;
     const nextIP = editingCam.ip.trim();
+    if (!isValidIPv4(nextIP)) {
+      setModalProbeMsg({
+        ok: false,
+        text: "请输入合法的 IPv4 地址（例如 192.168.1.100）",
+      });
+      return;
+    }
     setSavingManualCam(true);
     setModalProbeMsg(null);
     try {
@@ -769,6 +991,11 @@ export function DeviceManagerView({
           title: `静态 IP 已更新：${originalIP} → ${updatedCam.ip}`,
         });
       }
+    } catch (err) {
+      setModalProbeMsg({
+        ok: false,
+        text: err instanceof Error ? err.message : String(err),
+      });
     } finally {
       setSavingManualCam(false);
     }
@@ -818,7 +1045,7 @@ export function DeviceManagerView({
       ),
     },
     {
-      key: "vendor",
+      key: "vendor_sort",
       label: "品牌协议 / 码流路径",
       sortable: true,
       numeric: false,
@@ -851,7 +1078,7 @@ export function DeviceManagerView({
     },
     {
       key: "rec_status_sort",
-      label: "录像状态",
+      label: "运行 / 录像状态",
       sortable: true,
       numeric: false,
       width: "15%",
@@ -891,6 +1118,13 @@ export function DeviceManagerView({
             </div>
           );
         }
+        if (hasKnownOnlineMap && onlineMap?.[row.id] === false) {
+          return (
+            <Badge tone="warning" size="sm">
+              离线 / 未连接
+            </Badge>
+          );
+        }
         if (row.auto_record) {
           if (recordingConfig.schedule_enabled) {
             return (
@@ -902,6 +1136,13 @@ export function DeviceManagerView({
           return (
             <Badge tone="info" size="sm">
               等待视频流…
+            </Badge>
+          );
+        }
+        if (onlineMap?.[row.id]) {
+          return (
+            <Badge tone="success" size="sm">
+              在线待命
             </Badge>
           );
         }
@@ -942,6 +1183,12 @@ export function DeviceManagerView({
                   tone: "info",
                   title: `已向 ${row.name} (${row.ip}) 发送重启指令`,
                 });
+              } catch (err) {
+                setBanner({
+                  tone: "danger",
+                  title: `向 ${row.name} (${row.ip}) 发送重启指令失败`,
+                  detail: err instanceof Error ? err.message : String(err),
+                });
               } finally {
                 setRebootingId(null);
               }
@@ -959,7 +1206,7 @@ export function DeviceManagerView({
               const meta = getVendorMeta(row.vendor, row.model);
               setIsEditMode(true);
               setOriginalIP(row.ip);
-              setSyncHardwareIP(true);
+              setSyncHardwareIP(false);
               setHwNetmask("255.255.255.0");
               setHwGateway(inferGatewayFromIP(row.ip));
               setHwNetInfo(null);
@@ -970,6 +1217,9 @@ export function DeviceManagerView({
                 vendor: meta.value,
                 main_stream_path: row.main_stream_path || meta.mainPath,
                 sub_stream_path: row.sub_stream_path || meta.subPath,
+                supports_talk: row.supports_talk ?? meta.supportsTalk,
+                rtsp_port: row.rtsp_port || 554,
+                talk_port: row.talk_port || 8800,
               });
               void fetchCameraHardwareNetwork(
                 row.id,
@@ -1024,9 +1274,9 @@ export function DeviceManagerView({
 
           <div className="discovery-compact-bar__inputs">
             <div className="compact-inline-input">
-              <label htmlFor="scan-subnet-input">网段前缀</label>
-              <input
+              <Input
                 id="scan-subnet-input"
+                label="网段前缀"
                 type="text"
                 value={subnet}
                 onChange={(e) => setSubnet(e.target.value)}
@@ -1035,9 +1285,9 @@ export function DeviceManagerView({
             </div>
 
             <div className="compact-inline-input">
-              <label htmlFor="scan-user-input">账号</label>
-              <input
+              <Input
                 id="scan-user-input"
+                label="账号"
                 type="text"
                 value={scanUser}
                 onChange={(e) => setScanUser(e.target.value)}
@@ -1145,6 +1395,7 @@ export function DeviceManagerView({
 
             <ScrollArea
               maxHeight="15.5rem"
+              orientation="both"
               fade={0}
               className="table-scroll scan-table-scroll"
               label="局域网扫描发现结果"
@@ -1160,6 +1411,7 @@ export function DeviceManagerView({
                     <th style={{ width: 145 }}>所属分组</th>
                     <th style={{ width: 140 }}>硬件型号 / 协议</th>
                     <th style={{ width: 92 }}>自动录像</th>
+                    <th style={{ width: 108 }}>操作</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1214,33 +1466,35 @@ export function DeviceManagerView({
                       </td>
                       <td>
                         <div className="scan-ip-cell">
-                          <input
-                            type="text"
-                            className="inline-table-input mono-text scan-ip-input"
-                            value={item.editIP}
-                            aria-label={`${item.ip} 目标静态 IP 地址`}
-                            title="直接修改此 IP 并点击「改机身IP」（或勾选后点击顶部「入库 / 更新所选」），即可把摄像头硬件改为新的固定静态 IP"
-                            onChange={(e) => {
-                              const val = e.target.value;
-                              setScanItems((prev) =>
-                                prev.map((row, i) =>
-                                  i === idx
-                                    ? { ...row, editIP: val, probeError: undefined }
-                                    : row
-                                )
-                              );
-                            }}
-                            onKeyDown={(e) => {
-                              if (
-                                e.key === "Enter" &&
-                                item.editIP.trim() &&
-                                item.editIP.trim() !== item.ip
-                              ) {
-                                e.preventDefault();
-                                void handleChangeScanRowIP(idx);
-                              }
-                            }}
-                          />
+                          <div className="table-text-field">
+                            <Input
+                              label={`${item.ip} 目标静态 IP 地址`}
+                              type="text"
+                              className="inline-table-input mono-text scan-ip-input"
+                              value={item.editIP}
+                              title="直接修改此 IP 并点击「改机身IP」（或勾选后点击顶部「入库 / 更新所选」），即可把摄像头硬件改为新的固定静态 IP"
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setScanItems((prev) =>
+                                  prev.map((row, i) =>
+                                    i === idx
+                                      ? { ...row, editIP: val, probeError: undefined }
+                                      : row
+                                  )
+                                );
+                              }}
+                              onKeyDown={(e) => {
+                                if (
+                                  e.key === "Enter" &&
+                                  item.editIP.trim() &&
+                                  item.editIP.trim() !== item.ip
+                                ) {
+                                  e.preventDefault();
+                                  void handleChangeScanRowIP(idx);
+                                }
+                              }}
+                            />
+                          </div>
                           {item.editIP.trim() !== "" &&
                             item.editIP.trim() !== item.ip && (
                               <Button
@@ -1312,38 +1566,54 @@ export function DeviceManagerView({
                         </div>
                       </td>
                       <td>
-                        <input
-                          type="text"
-                          className="inline-table-input"
-                          value={item.editName}
-                          aria-label={`${item.ip} 设备名称`}
-                          onChange={(e) => {
-                            const val = e.target.value;
-                            setScanItems((prev) =>
-                              prev.map((row, i) =>
-                                i === idx ? { ...row, editName: val } : row
-                              )
-                            );
-                          }}
-                        />
+                        <div className="table-text-field">
+                          <Input
+                            label={`${item.ip} 设备名称`}
+                            type="text"
+                            className="inline-table-input"
+                            value={item.editName}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setScanItems((prev) =>
+                                prev.map((row, i) =>
+                                  i === idx ? { ...row, editName: val } : row
+                                )
+                              );
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                void handleAddSingleScanRow(idx);
+                              }
+                            }}
+                          />
+                        </div>
                       </td>
                       <td>
-                        <input
-                          type="text"
-                          list="camera-group-datalist"
-                          className="inline-table-input"
-                          value={item.editGroup}
-                          placeholder={DEFAULT_GROUP}
-                          aria-label={`${item.ip} 所属分组`}
-                          onChange={(e) => {
-                            const val = e.target.value;
-                            setScanItems((prev) =>
-                              prev.map((row, i) =>
-                                i === idx ? { ...row, editGroup: val } : row
-                              )
-                            );
-                          }}
-                        />
+                        <div className="table-text-field">
+                          <Input
+                            label={`${item.ip} 所属分组`}
+                            type="text"
+                            list="camera-group-datalist"
+                            className="inline-table-input"
+                            value={item.editGroup}
+                            placeholder={DEFAULT_GROUP}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setScanItems((prev) =>
+                                prev.map((row, i) =>
+                                  i === idx ? { ...row, editGroup: val } : row
+                                )
+                              );
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                void handleAddSingleScanRow(idx);
+                              }
+                            }}
+                          />
+                        </div>
                       </td>
                       <td className="text-muted-sm">
                         <div className="scan-model-ports">
@@ -1368,6 +1638,33 @@ export function DeviceManagerView({
                           }
                           aria-label={`${item.editName} 自动录像`}
                         />
+                      </td>
+                      <td>
+                        <Button
+                          type="button"
+                          variant={
+                            item.status === "new" ||
+                            item.status === "ip_shifted" ||
+                            (item.editIP.trim() !== "" && item.editIP.trim() !== item.ip)
+                              ? "primary"
+                              : "secondary"
+                          }
+                          size="sm"
+                          loading={Boolean(item.addingRow)}
+                          disabled={Boolean(item.changingIP) || batchAdding}
+                          onClick={() => void handleAddSingleScanRow(idx)}
+                          title="无需勾选，直接将当前行摄像头单独入库或保存修改（保留扫描列表）"
+                        >
+                          <span>
+                            {item.editIP.trim() !== "" && item.editIP.trim() !== item.ip
+                              ? "改IP并入库"
+                              : item.status === "new"
+                                ? "单独入库"
+                                : item.status === "ip_shifted"
+                                  ? "更新IP"
+                                  : "保存修改"}
+                          </span>
+                        </Button>
                       </td>
                     </tr>
                   ))}
@@ -1488,13 +1785,14 @@ export function DeviceManagerView({
                 />
 
                 <SegmentedControl
-                  label="按录制状态筛选"
+                  label="按运行与录制状态筛选"
                   value={statusFilter}
                   onValueChange={setStatusFilter}
                   options={[
                     { value: "all", label: "全部状态" },
                     { value: "recording", label: "正在录制" },
-                    { value: "idle", label: "待命/异常" },
+                    { value: "error", label: "离线/异常" },
+                    { value: "idle", label: "正常待命" },
                   ]}
                 />
               </div>
@@ -1511,6 +1809,7 @@ export function DeviceManagerView({
 
             <ScrollArea
               className="segments-table-scroll"
+              orientation="both"
               fade={0}
               label="已管理摄像头设备列表"
             >
@@ -1605,6 +1904,9 @@ export function DeviceManagerView({
                     const nextGw = inferGatewayFromIP(nextIP);
                     if (!hwGateway || hwGateway === prevGw) {
                       setHwGateway(nextGw);
+                    }
+                    if (isEditMode && originalIP && nextIP.trim() !== originalIP) {
+                      setSyncHardwareIP(true);
                     }
                     setEditingCam({ ...editingCam, ip: nextIP });
                   }}
@@ -1709,6 +2011,49 @@ export function DeviceManagerView({
                   }
                   placeholder="例如：/stream2"
                 />
+                <Input
+                  label="RTSP 端口"
+                  inputMode="numeric"
+                  value={String(editingCam.rtsp_port ?? 554)}
+                  onChange={(e) => {
+                    const num = parseInt(e.target.value.replace(/\D/g, ""), 10);
+                    setEditingCam({
+                      ...editingCam,
+                      rtsp_port: Number.isFinite(num) && num > 0 && num <= 65535 ? num : 0,
+                    });
+                  }}
+                  placeholder="默认 554"
+                />
+                <Input
+                  label="语音对讲端口"
+                  inputMode="numeric"
+                  value={String(editingCam.talk_port ?? 8800)}
+                  onChange={(e) => {
+                    const num = parseInt(e.target.value.replace(/\D/g, ""), 10);
+                    setEditingCam({
+                      ...editingCam,
+                      talk_port: Number.isFinite(num) && num > 0 && num <= 65535 ? num : 0,
+                    });
+                  }}
+                  placeholder="默认 8800"
+                />
+              </div>
+
+              <div className="manual-cam-switches">
+                <Switch
+                  checked={Boolean(editingCam.auto_record)}
+                  onCheckedChange={(on) =>
+                    setEditingCam({ ...editingCam, auto_record: on })
+                  }
+                  label="开启自动录像"
+                />
+                <Switch
+                  checked={editingCam.supports_talk !== false}
+                  onCheckedChange={(on) =>
+                    setEditingCam({ ...editingCam, supports_talk: on })
+                  }
+                  label="支持双向语音对讲"
+                />
               </div>
 
               {isEditMode && (
@@ -1805,9 +2150,13 @@ export function DeviceManagerView({
                     <span>
                       {isEditMode &&
                       syncHardwareIP &&
-                      editingCam.ip?.trim() &&
-                      editingCam.ip.trim() !== originalIP
-                        ? `修改 IP 并保存`
+                      ((editingCam.ip?.trim() &&
+                        editingCam.ip.trim() !== originalIP) ||
+                        hwNetInfo?.proto === "dhcp" ||
+                        (hwNetInfo &&
+                          (hwNetmask.trim() !== hwNetInfo.netmask ||
+                            hwGateway.trim() !== hwNetInfo.gateway)))
+                        ? `修改硬件网络并保存`
                         : `保存`}
                     </span>
                   </Button>
@@ -1850,6 +2199,12 @@ export function DeviceManagerView({
                   try {
                     await onDeleteCamera(pendingDeleteCam.id);
                     setPendingDeleteCam(null);
+                  } catch (err) {
+                    setBanner({
+                      tone: "danger",
+                      title: "移除摄像头失败",
+                      detail: err instanceof Error ? err.message : String(err),
+                    });
                   } finally {
                     setDeletingCam(false);
                   }
@@ -1895,6 +2250,12 @@ export function DeviceManagerView({
                   try {
                     await onClearAllCameras();
                     setConfirmClearAllOpen(false);
+                  } catch (err) {
+                    setBanner({
+                      tone: "danger",
+                      title: "清空全部摄像头失败",
+                      detail: err instanceof Error ? err.message : String(err),
+                    });
                   } finally {
                     setClearingAll(false);
                   }

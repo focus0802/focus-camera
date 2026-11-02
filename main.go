@@ -365,53 +365,72 @@ func main() {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			cam.IP = strings.TrimSpace(cam.IP)
+			validIP, ok := config.IsValidIPv4(cam.IP)
+			if !ok {
+				http.Error(w, "请输入合法的 IPv4 地址（例如 192.168.1.100）", http.StatusBadRequest)
+				return
+			}
+			cam.IP = validIP
 			cam.Name = strings.TrimSpace(cam.Name)
-			if cam.IP != "" {
-				cfg := store.GetConfig()
-				user := strings.TrimSpace(cam.Username)
-				if user == "" {
-					user = cfg.DefaultUsername
-				}
-				pass := cam.Password
-				if pass == "" && !cam.NoPassword {
-					pass = cfg.DefaultPassword
-				}
-				if cam.Name == "" || strings.HasPrefix(cam.Name, "摄像头 (") {
-					if res, ok := discovery.ProbeTPLinkCameraDetail(cam.IP, user, []string{pass}, true, 1800*time.Millisecond); ok && res.AuthOK {
-						if cam.Name == "" || strings.HasPrefix(cam.Name, "摄像头 (") {
-							cam.Name = res.Camera.Name
-						}
-						if cam.Group == "" {
-							cam.Group = res.Camera.Group
-						}
-						if cam.Model == "" {
-							cam.Model = res.Camera.Model
-						}
-						if cam.Vendor == "" {
-							cam.Vendor = res.Camera.Vendor
-						}
-						if cam.MainStreamPath == "" {
-							cam.MainStreamPath = res.Camera.MainStreamPath
-						}
-						if cam.SubStreamPath == "" {
-							cam.SubStreamPath = res.Camera.SubStreamPath
-						}
-						if res.Camera.SupportsTalk {
-							cam.SupportsTalk = true
-						}
-						cam.Password = res.Camera.Password
-						cam.NoPassword = res.Camera.NoPassword
-					}
-				} else if cam.IsTPLink() {
-					go func(ip, u, p string) {
-						_ = discovery.EnsureH264Video(ip, u, p)
-					}(cam.IP, user, pass)
+
+			// When creating a new camera via POST, prevent silently overwriting an already-added IP.
+			if r.Method == http.MethodPost && strings.TrimSpace(cam.ID) == "" {
+				if existing, exists := store.GetCamera(cam.IP); exists {
+					http.Error(w, fmt.Sprintf("IP 地址 %s 已存在于设备列表（%s），请直接编辑该设备", cam.IP, existing.Name), http.StatusConflict)
+					return
 				}
 			}
+
+			lookupKey := cam.ID
+			if lookupKey == "" {
+				lookupKey = cam.IP
+			}
+			prevCam, hadPrev := store.GetCamera(lookupKey)
+
+			cfg := store.GetConfig()
+			user := strings.TrimSpace(cam.Username)
+			if user == "" {
+				user = cfg.DefaultUsername
+			}
+			pass := cam.Password
+			if pass == "" && !cam.NoPassword {
+				pass = cfg.DefaultPassword
+			}
+			if cam.Name == "" || strings.HasPrefix(cam.Name, "摄像头 (") {
+				if res, ok := discovery.ProbeTPLinkCameraDetail(cam.IP, user, []string{pass}, true, 1800*time.Millisecond); ok && res.AuthOK {
+					if cam.Name == "" || strings.HasPrefix(cam.Name, "摄像头 (") {
+						cam.Name = res.Camera.Name
+					}
+					if cam.Group == "" {
+						cam.Group = res.Camera.Group
+					}
+					if cam.Model == "" {
+						cam.Model = res.Camera.Model
+					}
+					if cam.Vendor == "" {
+						cam.Vendor = res.Camera.Vendor
+					}
+					if cam.MainStreamPath == "" {
+						cam.MainStreamPath = res.Camera.MainStreamPath
+					}
+					if cam.SubStreamPath == "" {
+						cam.SubStreamPath = res.Camera.SubStreamPath
+					}
+					if res.Camera.SupportsTalk {
+						cam.SupportsTalk = true
+					}
+					cam.Password = res.Camera.Password
+					cam.NoPassword = res.Camera.NoPassword
+				}
+			} else if cam.IsTPLink() {
+				go func(ip, u, p string) {
+					_ = discovery.EnsureH264Video(ip, u, p)
+				}(cam.IP, user, pass)
+			}
+
 			oldID, newID, err := store.UpsertCameraTrackID(cam)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
 			if oldID != "" && oldID != newID {
@@ -419,6 +438,19 @@ func main() {
 				recMgr.MigrateCameraID(oldID, newID)
 			} else {
 				recMgr.SyncNow()
+				if hadPrev {
+					savedCam, _ := store.GetCamera(newID)
+					if prevCam.Username != savedCam.Username ||
+						prevCam.Password != savedCam.Password ||
+						prevCam.NoPassword != savedCam.NoPassword ||
+						prevCam.RTSPPort != savedCam.RTSPPort ||
+						prevCam.Vendor != savedCam.Vendor ||
+						prevCam.MainStreamPath != savedCam.MainStreamPath ||
+						prevCam.SubStreamPath != savedCam.SubStreamPath {
+						hub.ReconnectCamera(newID, "main")
+						hub.ReconnectCamera(newID, "sub")
+					}
+				}
 			}
 			updCfg := store.GetConfig()
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -428,11 +460,13 @@ func main() {
 				"record_status": recMgr.GetStatus(),
 			})
 		case http.MethodDelete:
-			id := r.URL.Query().Get("id")
+			id := strings.TrimSpace(r.URL.Query().Get("id"))
 			if err := store.DeleteCamera(id); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
+			hub.CloseCamera(id)
+			hub.CloseCamera(config.MakeID(id))
 			recMgr.SyncNow()
 			updCfg := store.GetConfig()
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -565,6 +599,7 @@ func main() {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		hub.CloseAll()
 		recMgr.SyncNow()
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ok":            true,

@@ -604,11 +604,22 @@ export function App() {
   );
 
   const handleRebootCamera = useCallback(async (camera: Camera) => {
-    await fetch("/api/cameras/reboot", {
+    const res = await fetch("/api/cameras/reboot", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id: camera.id, ip: camera.ip }),
     });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      throw new Error(errText.trim() || `远程重启请求失败 (HTTP ${res.status})`);
+    }
+    const data = (await res.json().catch(() => null)) as {
+      ok?: boolean;
+      error?: string;
+    } | null;
+    if (data && data.ok === false) {
+      throw new Error(data.error || "远程重启指令发送失败");
+    }
   }, []);
 
   // Filtering & Pagination for Live Wall
@@ -1550,6 +1561,7 @@ export function App() {
         {activeTab === "devices" && (
           <DeviceManagerView
             cameras={cameras}
+            onlineMap={onlineMap}
             recordingStates={recordingStateMap}
             recordingConfig={recordingsPayload?.config ?? DEFAULT_REC_CONFIG}
             defaultSubnet={defaultSubnet}
@@ -1563,21 +1575,41 @@ export function App() {
             onToggleCameraAutoRecord={handleToggleCameraAutoRecord}
             onToggleAllAutoRecord={handleToggleAllAutoRecord}
             onSaveCamera={async (cam, isEdit) => {
-              await fetch("/api/cameras", {
+              const res = await fetch("/api/cameras", {
                 method: isEdit ? "PUT" : "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(cam),
               });
+              if (!res.ok) {
+                const errText = await res.text().catch(() => "");
+                throw new Error(errText.trim() || `保存设备失败 (HTTP ${res.status})`);
+              }
               await Promise.all([fetchCameras(), fetchRecordings()]);
             }}
             onDeleteCamera={async (id) => {
-              await fetch(`/api/cameras?id=${encodeURIComponent(id)}`, {
+              if (talkCamera?.id === id) {
+                stopTalkback();
+              }
+              if (zoomCamera?.id === id) {
+                setZoomCamera(null);
+              }
+              const res = await fetch(`/api/cameras?id=${encodeURIComponent(id)}`, {
                 method: "DELETE",
               });
+              if (!res.ok) {
+                const errText = await res.text().catch(() => "");
+                throw new Error(errText.trim() || `删除设备失败 (HTTP ${res.status})`);
+              }
               await Promise.all([fetchCameras(), fetchRecordings()]);
             }}
             onClearAllCameras={async () => {
-              await fetch("/api/cameras/clear", { method: "POST" });
+              stopTalkback();
+              setZoomCamera(null);
+              const res = await fetch("/api/cameras/clear", { method: "POST" });
+              if (!res.ok) {
+                const errText = await res.text().catch(() => "");
+                throw new Error(errText.trim() || `清空设备失败 (HTTP ${res.status})`);
+              }
               await Promise.all([fetchCameras(), fetchRecordings()]);
             }}
             onRebootCamera={handleRebootCamera}

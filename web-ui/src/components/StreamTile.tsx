@@ -724,6 +724,8 @@ export function StreamTile({
         setManualReconnecting(true);
         setReloadNonce((n) => n + 1);
       }, 6000);
+    } catch (err: any) {
+      setManualRetryFeedback(err?.message || "重启指令发送失败");
     } finally {
       setRebooting(false);
     }

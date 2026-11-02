@@ -2,6 +2,8 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -11,6 +13,22 @@ import (
 	"strings"
 	"sync"
 )
+
+func IsValidIPv4(ip string) (string, bool) {
+	ipStr := strings.TrimSpace(ip)
+	if ipStr == "" {
+		return "", false
+	}
+	parsed := net.ParseIP(ipStr)
+	if parsed == nil {
+		return "", false
+	}
+	v4 := parsed.To4()
+	if v4 == nil {
+		return "", false
+	}
+	return v4.String(), true
+}
 
 type PTZPreset struct {
 	ID       string  `json:"id"`
@@ -408,9 +426,25 @@ func (s *Store) UpsertCamera(cam Camera) error {
 func (s *Store) UpsertCameraTrackID(cam Camera) (oldID string, newID string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	validIP, ok := IsValidIPv4(cam.IP)
+	if !ok {
+		return "", "", fmt.Errorf("无效的 IPv4 地址: %s", strings.TrimSpace(cam.IP))
+	}
+	cam.IP = validIP
+
 	origSort := cam.SortOrder
 	s.normalizeCameraLocked(&cam)
 	newID = MakeID(cam.IP)
+
+	// When editing an existing camera (cam.ID != ""), reject if the new IP is already occupied by another camera.
+	if cam.ID != "" && cam.ID != newID {
+		for _, existing := range s.cfg.Cameras {
+			if existing.ID != cam.ID && (existing.IP == cam.IP || existing.ID == newID) {
+				return "", "", fmt.Errorf("IP 地址 %s 已被设备「%s」占用", cam.IP, existing.Name)
+			}
+		}
+	}
+
 	updated := false
 	for i := range s.cfg.Cameras {
 		if s.cfg.Cameras[i].ID == cam.ID || s.cfg.Cameras[i].IP == cam.IP {
@@ -461,16 +495,17 @@ func (s *Store) BatchUpsertCameras(cams []Camera, defaultSubnet, defaultUser, de
 	}
 
 	for _, cam := range cams {
-		if strings.TrimSpace(cam.IP) == "" {
+		validIP, ok := IsValidIPv4(cam.IP)
+		if !ok {
 			continue
 		}
+		cam.IP = validIP
 		s.normalizeCameraLocked(&cam)
 
 		found := false
 		// 1. Reconcile by room name if a room's DHCP IP shifted
 		for i := range s.cfg.Cameras {
 			if cam.Name != "" && !strings.HasPrefix(cam.Name, "摄像头 (") && s.cfg.Cameras[i].Name == cam.Name {
-				cam.AutoRecord = s.cfg.Cameras[i].AutoRecord
 				if len(cam.PTZPresets) == 0 && len(s.cfg.Cameras[i].PTZPresets) > 0 {
 					cam.PTZPresets = s.cfg.Cameras[i].PTZPresets
 				}
@@ -502,7 +537,6 @@ func (s *Store) BatchUpsertCameras(cams []Camera, defaultSubnet, defaultUser, de
 		// 2. Match by IP or ID
 		for i := range s.cfg.Cameras {
 			if s.cfg.Cameras[i].IP == cam.IP || s.cfg.Cameras[i].ID == cam.ID {
-				cam.AutoRecord = s.cfg.Cameras[i].AutoRecord
 				if len(cam.PTZPresets) == 0 && len(s.cfg.Cameras[i].PTZPresets) > 0 {
 					cam.PTZPresets = s.cfg.Cameras[i].PTZPresets
 				}
@@ -534,6 +568,20 @@ func (s *Store) BatchUpsertCameras(cams []Camera, defaultSubnet, defaultUser, de
 			added++
 		}
 	}
+
+	// Ensure no duplicate camera IDs exist after DHCP IP shift reconciliation
+	seenIDs := make(map[string]int, len(s.cfg.Cameras))
+	deduped := make([]Camera, 0, len(s.cfg.Cameras))
+	for _, c := range s.cfg.Cameras {
+		if idx, exists := seenIDs[c.ID]; exists {
+			deduped[idx] = c
+		} else {
+			seenIDs[c.ID] = len(deduped)
+			deduped = append(deduped, c)
+		}
+	}
+	s.cfg.Cameras = deduped
+
 	SortCameras(s.cfg.Cameras)
 	return added, updated, s.save()
 }

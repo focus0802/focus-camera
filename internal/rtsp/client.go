@@ -229,6 +229,28 @@ func (h *StreamHub) CloseCamera(camID string) {
 	}
 }
 
+// CloseAll immediately terminates all active RTSP sessions in the hub.
+func (h *StreamHub) CloseAll() {
+	h.mu.Lock()
+	var waitChs []chan struct{}
+	for key, cs := range h.streams {
+		delete(h.streams, key)
+		if ch := cs.forceStop(); ch != nil {
+			waitChs = append(waitChs, ch)
+		}
+	}
+	h.mu.Unlock()
+
+	deadline := time.After(800 * time.Millisecond)
+	for _, ch := range waitChs {
+		select {
+		case <-ch:
+		case <-deadline:
+			return
+		}
+	}
+}
+
 // ReconnectCamera forces an immediate RTSP reconnect attempt for a camera stream,
 // clearing any cached error and waking up the stream worker if it is in backoff sleep.
 func (h *StreamHub) ReconnectCamera(camID, streamType string) {

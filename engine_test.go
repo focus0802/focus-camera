@@ -571,5 +571,54 @@ func TestPTZPresetsAndModelInference(t *testing.T) {
 	}
 }
 
+func TestDeviceManagementInvariants(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := config.NewStore(filepath.Join(tmpDir, "cameras.json"))
+	if err != nil {
+		t.Fatalf("NewStore err: %v", err)
+	}
+
+	// 1. Reject invalid IPv4 addresses (such as prefilled "192.168.1.")
+	if _, _, err := store.UpsertCameraTrackID(config.Camera{IP: "192.168.1.", Name: "Invalid"}); err == nil {
+		t.Fatalf("Expected UpsertCameraTrackID to reject incomplete IP '192.168.1.'")
+	}
+
+	// 2. Seed two cameras and verify IP collision is rejected when editing Camera A to Camera B's IP
+	_, _, err = store.BatchUpsertCameras([]config.Camera{
+		{Name: "1号琴房", IP: "192.0.2.101", AutoRecord: false},
+		{Name: "2号琴房", IP: "192.0.2.102", AutoRecord: false},
+	}, "192.0.2", "admin", "unit-test-pass")
+	if err != nil {
+		t.Fatalf("BatchUpsertCameras err: %v", err)
+	}
+
+	cam1, ok := store.GetCamera("192.0.2.101")
+	if !ok {
+		t.Fatalf("Expected to find 192.0.2.101")
+	}
+	cam1.IP = "192.0.2.102"
+	if _, _, err := store.UpsertCameraTrackID(cam1); err == nil {
+		t.Fatalf("Expected UpsertCameraTrackID to reject changing cam1 IP to already-occupied 192.0.2.102")
+	}
+
+	// 3. Verify BatchUpsertCameras honors AutoRecord toggle on existing and IP-shifted cameras
+	_, _, err = store.BatchUpsertCameras([]config.Camera{
+		{Name: "1号琴房", IP: "192.0.2.101", AutoRecord: true},
+		{Name: "2号琴房", IP: "192.0.2.112", AutoRecord: true},
+	}, "192.0.2", "admin", "unit-test-pass")
+	if err != nil {
+		t.Fatalf("BatchUpsertCameras update err: %v", err)
+	}
+	upd1, ok := store.GetCamera("192.0.2.101")
+	if !ok || !upd1.AutoRecord {
+		t.Fatalf("Expected existing camera 1号琴房 AutoRecord=true after BatchUpsertCameras, got %+v", upd1)
+	}
+	upd2, ok := store.GetCamera("192.0.2.112")
+	if !ok || !upd2.AutoRecord {
+		t.Fatalf("Expected IP-shifted camera 2号琴房 AutoRecord=true after BatchUpsertCameras, got %+v", upd2)
+	}
+}
+
+
 
 

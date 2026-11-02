@@ -81,6 +81,7 @@ export interface DiscoveredCamera {
   sub_stream_path?: string;
   supports_talk?: boolean;
   supports_ptz?: boolean;
+  auto_record?: boolean;
   device_model: string;
   hardware_ver: string;
   firmware_ver: string;
