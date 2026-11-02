@@ -159,6 +159,8 @@ type cameraStream struct {
 	lastIDR     []byte
 	online      bool
 	lastError   string
+	activeConn  net.Conn
+	reconnectCh chan struct{}
 	stopCh      chan struct{}
 	doneCh      chan struct{}
 	stopped     bool
@@ -166,13 +168,14 @@ type cameraStream struct {
 
 func newCameraStream(store *config.Store, cam config.Camera, streamType string, onShutdown func()) *cameraStream {
 	return &cameraStream{
-		store:      store,
-		cam:        cam,
-		streamType: streamType,
-		onShutdown: onShutdown,
-		subs:       make(map[string]*Subscriber),
-		stopCh:     make(chan struct{}),
-		doneCh:     make(chan struct{}),
+		store:       store,
+		cam:         cam,
+		streamType:  streamType,
+		onShutdown:  onShutdown,
+		subs:        make(map[string]*Subscriber),
+		reconnectCh: make(chan struct{}, 1),
+		stopCh:      make(chan struct{}),
+		doneCh:      make(chan struct{}),
 	}
 }
 
@@ -224,6 +227,48 @@ func (h *StreamHub) CloseCamera(camID string) {
 			return
 		}
 	}
+}
+
+// ReconnectCamera forces an immediate RTSP reconnect attempt for a camera stream,
+// clearing any cached error and waking up the stream worker if it is in backoff sleep.
+func (h *StreamHub) ReconnectCamera(camID, streamType string) {
+	cam, ok := h.store.GetCamera(camID)
+	if !ok {
+		return
+	}
+	if streamType == "main" || streamType == "stream1" {
+		streamType = "main"
+	} else {
+		streamType = "sub"
+	}
+	key := cam.ID + ":" + streamType
+	h.mu.Lock()
+	cs, exists := h.streams[key]
+	h.mu.Unlock()
+	if exists {
+		cs.triggerReconnect()
+	}
+}
+
+func (cs *cameraStream) triggerReconnect() {
+	pkt := makeStatusPacket("connecting", "")
+	cs.mu.Lock()
+	cs.online = false
+	cs.lastError = ""
+	if cs.activeConn != nil {
+		_ = cs.activeConn.SetDeadline(time.Now())
+	}
+	select {
+	case cs.reconnectCh <- struct{}{}:
+	default:
+	}
+	for _, sub := range cs.subs {
+		select {
+		case sub.Ch <- pkt:
+		default:
+		}
+	}
+	cs.mu.Unlock()
 }
 
 func (cs *cameraStream) addSubscriber(wantAudio bool) *Subscriber {
@@ -396,6 +441,38 @@ func paceRTSPHandshake() func() {
 	}
 }
 
+func humanizeRTSPError(err error) string {
+	if err == nil {
+		return ""
+	}
+	raw := strings.TrimSpace(err.Error())
+	lower := strings.ToLower(raw)
+
+	switch {
+	case strings.Contains(lower, "401") || strings.Contains(raw, "密码") || strings.Contains(raw, "鉴权"):
+		return "摄像头密码错误，请在「设备管理」中核对密码"
+	case strings.Contains(lower, "406") || strings.Contains(lower, "453") || strings.Contains(raw, "通道连接数已满"):
+		return "摄像头画面通道已占满 (406)，可点击下方按钮重启释放"
+	case strings.Contains(lower, "404") || strings.Contains(raw, "未找到视频流"):
+		return "未找到摄像头画面通道，请检查品牌或码流路径设置"
+	case strings.Contains(lower, "connection refused") || strings.Contains(lower, "actively refused"):
+		return "摄像头拒绝连接，设备可能正在重启或服务未就绪"
+	case strings.Contains(lower, "no route to host") || strings.Contains(lower, "host is down") || strings.Contains(lower, "network is unreachable") || strings.Contains(lower, "unreachable"):
+		return "摄像头离线或网络不通，请检查电源与网线连接"
+	case strings.Contains(lower, "i/o timeout") || strings.Contains(lower, "timed out") || strings.Contains(lower, "timeout") || strings.Contains(lower, "did not properly respond") || strings.Contains(lower, "failed to respond"):
+		if strings.Contains(lower, "dial") || strings.Contains(raw, "连接") {
+			return "无法连接摄像头，请检查设备电源、网线或 IP 地址"
+		}
+		return "画面传输超时，系统正在自动重连"
+	case strings.Contains(lower, "connection reset") || strings.Contains(lower, "forcibly closed") || strings.Contains(lower, "broken pipe") || lower == "eof" || strings.Contains(lower, "unexpected eof"):
+		return "摄像头画面连接中断，系统正在自动重连"
+	case strings.Contains(raw, "自动重连") || strings.Contains(raw, "摄像头"):
+		return raw
+	default:
+		return "摄像头暂未响应，请检查电源或网络连接"
+	}
+}
+
 func (cs *cameraStream) run() {
 	defer close(cs.doneCh)
 	consecutive406 := 0
@@ -403,6 +480,10 @@ func (cs *cameraStream) run() {
 		select {
 		case <-cs.stopCh:
 			return
+		default:
+		}
+		select {
+		case <-cs.reconnectCh:
 		default:
 		}
 
@@ -418,11 +499,12 @@ func (cs *cameraStream) run() {
 		}
 		retryWait := 2 * time.Second
 		if err != nil {
-			errMsg := err.Error()
-			if strings.Contains(errMsg, "已自动切换为 H.264") {
+			rawMsg := err.Error()
+			errMsg := humanizeRTSPError(err)
+			if strings.Contains(rawMsg, "已自动切换为 H.264") {
 				retryWait = 350 * time.Millisecond
 				consecutive406 = 0
-			} else if strings.Contains(errMsg, "406") {
+			} else if strings.Contains(rawMsg, "406") {
 				consecutive406++
 				switch consecutive406 {
 				case 1:
@@ -441,6 +523,8 @@ func (cs *cameraStream) run() {
 		select {
 		case <-cs.stopCh:
 			return
+		case <-cs.reconnectCh:
+			consecutive406 = 0
 		case <-time.After(retryWait):
 		}
 	}
@@ -617,9 +701,19 @@ func (cs *cameraStream) streamOnce() error {
 
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", cs.cam.IP, port), 3*time.Second)
 	if err != nil {
-		return fmt.Errorf("连接 RTSP 失败: %w", err)
+		return fmt.Errorf("连接摄像头失败: %w", err)
 	}
-	defer conn.Close()
+	cs.mu.Lock()
+	cs.activeConn = conn
+	cs.mu.Unlock()
+	defer func() {
+		cs.mu.Lock()
+		if cs.activeConn == conn {
+			cs.activeConn = nil
+		}
+		cs.mu.Unlock()
+		_ = conn.Close()
+	}()
 
 	releaseHandshake := paceRTSPHandshake()
 	handshakeReleased := false

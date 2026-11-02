@@ -12,12 +12,10 @@ import {
   VolumeX,
 } from "lucide-react";
 import {
-  AnimatePresence,
   animate,
   motion,
   useMotionValue,
   useReducedMotion,
-  type Variants,
 } from "motion/react";
 import { motionTokens } from "./arc/lib/motion-tokens";
 import {
@@ -27,25 +25,8 @@ import {
 } from "../types";
 import { RoomAudioPlayer } from "../lib/audio";
 
-/** Same settle spring & rolling digit variants as @uiarc/reorderable-list */
+/** Same settle spring as @uiarc/reorderable-list */
 const settleSpring = { type: "spring" as const, stiffness: 520, damping: 40 };
-const rollVariants: Variants = {
-  enter: (direction: number) => ({
-    opacity: 0,
-    y: `${0.5 * direction}em`,
-    filter: `blur(${motionTokens.blur.subtle}px)`,
-  }),
-  center: { opacity: 1, y: 0, filter: "blur(0px)" },
-  exit: (direction: number) => ({
-    opacity: 0,
-    y: `${-0.5 * direction}em`,
-    filter: `blur(${motionTokens.blur.subtle}px)`,
-    transition: {
-      duration: motionTokens.duration.instant,
-      ease: [...motionTokens.ease.standard],
-    },
-  }),
-};
 
 interface StreamTileProps {
   camera: Camera;
@@ -114,6 +95,111 @@ function buildHEVCCodecString(hvcc: Uint8Array): string {
   return `hvc1.${spacePrefix}${profileIdc}.${compatHex}.${tierChar}${levelIdc}.${constraints.join(".")}`;
 }
 
+interface StreamIssueInfo {
+  title: string;
+  hint: string;
+  isChannelFull: boolean;
+}
+
+function describeStreamIssue(rawError: string): StreamIssueInfo {
+  const text = rawError.trim();
+  const lower = text.toLowerCase();
+
+  if (
+    lower.includes("406") ||
+    lower.includes("453") ||
+    text.includes("通道连接数已满") ||
+    text.includes("通道已占满")
+  ) {
+    return {
+      title: "摄像头画面通道已占满",
+      hint: "可能被录像机或其他软件占用，可点击下方按钮重启释放",
+      isChannelFull: true,
+    };
+  }
+
+  if (lower.includes("401") || text.includes("密码") || text.includes("鉴权")) {
+    return {
+      title: "摄像头密码验证未通过",
+      hint: "请在「设备管理」中核对该摄像头的登录密码",
+      isChannelFull: false,
+    };
+  }
+
+  if (lower.includes("404") || text.includes("未找到") || text.includes("码流路径")) {
+    return {
+      title: "未找到摄像头画面通道",
+      hint: "请在「设备管理」中检查摄像头品牌或码流路径设置",
+      isChannelFull: false,
+    };
+  }
+
+  if (
+    lower.includes("connection refused") ||
+    lower.includes("actively refused") ||
+    text.includes("拒绝连接") ||
+    text.includes("正在重启")
+  ) {
+    return {
+      title: "摄像头暂未就绪",
+      hint: "设备可能正在重启或服务启动中，系统正在自动重连",
+      isChannelFull: false,
+    };
+  }
+
+  if (
+    lower.includes("no route to host") ||
+    lower.includes("host is down") ||
+    lower.includes("unreachable") ||
+    text.includes("离线") ||
+    text.includes("网络不通")
+  ) {
+    return {
+      title: "摄像头离线或网络不通",
+      hint: "请检查摄像头电源、网线连接或 IP 地址设置",
+      isChannelFull: false,
+    };
+  }
+
+  if (
+    lower.includes("i/o timeout") ||
+    lower.includes("timed out") ||
+    lower.includes("timeout") ||
+    lower.includes("did not properly respond") ||
+    lower.includes("failed to respond") ||
+    text.includes("无法连接摄像头") ||
+    text.includes("连接摄像头失败") ||
+    text.includes("连接 RTSP 失败")
+  ) {
+    return {
+      title: "无法连接摄像头",
+      hint: "设备未响应，请检查电源、网线或 IP 地址是否正确",
+      isChannelFull: false,
+    };
+  }
+
+  if (
+    lower.includes("connection reset") ||
+    lower.includes("forcibly closed") ||
+    lower.includes("broken pipe") ||
+    lower.includes("eof") ||
+    text.includes("中断") ||
+    text.includes("超时")
+  ) {
+    return {
+      title: "画面连接已中断",
+      hint: "网络出现波动，系统正在自动尝试恢复画面",
+      isChannelFull: false,
+    };
+  }
+
+  return {
+    title: "摄像头暂未连接",
+    hint: "请检查设备电源与网络连接，系统正在自动重连",
+    isChannelFull: false,
+  };
+}
+
 export function StreamTile({
   camera,
   stream = "stream2",
@@ -165,14 +251,6 @@ export function StreamTile({
     lastClientY: 0,
   });
 
-  // Track rolling position direction like @uiarc/reorderable-list
-  const [previousIndex, setPreviousIndex] = useState(index);
-  const [direction, setDirection] = useState(1);
-  if (previousIndex !== index) {
-    setDirection(index > previousIndex ? 1 : -1);
-    setPreviousIndex(index);
-  }
-
   // Compensate x/y synchronously before paint whenever this card's grid slot moves mid-drag
   useLayoutEffect(() => {
     if (!draggingRef.current || !localTileRef.current) return;
@@ -191,6 +269,11 @@ export function StreamTile({
   const [hasFrame, setHasFrame] = useState<boolean>(false);
   const [rebooting, setRebooting] = useState<boolean>(false);
   const [reloadNonce, setReloadNonce] = useState<number>(0);
+  const [manualReconnecting, setManualReconnecting] = useState<boolean>(false);
+  const [manualRetryFeedback, setManualRetryFeedback] = useState<string>("");
+  const manualReconnectPendingRef = useRef<boolean>(false);
+  const manualReconnectStartRef = useRef<number>(0);
+  const manualFeedbackTimerRef = useRef<number | undefined>(undefined);
   const audioEnabledRef = useRef<boolean>(audioEnabled);
   audioEnabledRef.current = audioEnabled;
 
@@ -321,13 +404,23 @@ export function StreamTile({
 
     function connect() {
       if (unmounted) return;
-      setStatus((prev) => (hasPaintedOnce || prev === "live" ? "reconnecting" : "connecting"));
+      const isManualAttempt = manualReconnectPendingRef.current;
+      manualReconnectPendingRef.current = false;
+      setStatus((prev) =>
+        isManualAttempt
+          ? "connecting"
+          : hasPaintedOnce || prev === "live"
+          ? "reconnecting"
+          : "connecting"
+      );
 
       const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
       const streamParam = stream === "stream1" ? "main" : "sub";
       const wsUrl = `${proto}//${window.location.host}/ws/stream?id=${encodeURIComponent(
         camera.id
-      )}&stream=${streamParam}&audio=${audioEnabledRef.current ? "1" : "0"}`;
+      )}&stream=${streamParam}&audio=${audioEnabledRef.current ? "1" : "0"}${
+        isManualAttempt ? "&reconnect=1" : ""
+      }`;
 
       ws = new WebSocket(wsUrl);
       ws.binaryType = "arraybuffer";
@@ -388,6 +481,13 @@ export function StreamTile({
               data: payload,
             });
             decoder.decode(chunk);
+            if (manualFeedbackTimerRef.current) {
+              window.clearTimeout(manualFeedbackTimerRef.current);
+              manualFeedbackTimerRef.current = undefined;
+            }
+            manualReconnectStartRef.current = 0;
+            setManualReconnecting(false);
+            setManualRetryFeedback("");
             setStatus("live");
             setErrorText("");
             onStatusChange?.(camera.id, true);
@@ -407,13 +507,53 @@ export function StreamTile({
             const jsonText = new TextDecoder().decode(buf.subarray(1));
             const st = JSON.parse(jsonText);
             if (st.status === "online") {
+              if (manualFeedbackTimerRef.current) {
+                window.clearTimeout(manualFeedbackTimerRef.current);
+                manualFeedbackTimerRef.current = undefined;
+              }
+              manualReconnectStartRef.current = 0;
+              setManualReconnecting(false);
+              setManualRetryFeedback("");
               setStatus("live");
               setErrorText("");
               onStatusChange?.(camera.id, true);
             } else if (st.error) {
-              setErrorText(st.error);
-              setStatus(hasPaintedOnce ? "reconnecting" : "error");
-              onStatusChange?.(camera.id, false);
+              const applyErrorState = () => {
+                if (unmounted) return;
+                const wasManual = manualReconnectStartRef.current > 0;
+                manualReconnectStartRef.current = 0;
+                setManualReconnecting(false);
+                setErrorText(st.error);
+                setStatus(hasPaintedOnce ? "reconnecting" : "error");
+                if (wasManual) {
+                  const nowStr = new Date().toLocaleTimeString("zh-CN", {
+                    hour12: false,
+                    hour: "2-digit",
+                    minute: "2-digit",
+                    second: "2-digit",
+                  });
+                  setManualRetryFeedback(`已于 ${nowStr} 重试，仍未连接成功`);
+                }
+                onStatusChange?.(camera.id, false);
+              };
+
+              if (manualReconnectStartRef.current > 0) {
+                const elapsed = Date.now() - manualReconnectStartRef.current;
+                const minDisplayMs = 750;
+                if (elapsed < minDisplayMs) {
+                  if (manualFeedbackTimerRef.current) {
+                    window.clearTimeout(manualFeedbackTimerRef.current);
+                  }
+                  manualFeedbackTimerRef.current = window.setTimeout(
+                    applyErrorState,
+                    minDisplayMs - elapsed
+                  );
+                } else {
+                  applyErrorState();
+                }
+              } else {
+                applyErrorState();
+              }
             }
           } catch {}
         }
@@ -421,6 +561,26 @@ export function StreamTile({
 
       ws.onclose = () => {
         if (unmounted) return;
+        if (manualReconnectStartRef.current > 0) {
+          const elapsed = Date.now() - manualReconnectStartRef.current;
+          const remain = Math.max(0, 750 - elapsed);
+          if (manualFeedbackTimerRef.current) {
+            window.clearTimeout(manualFeedbackTimerRef.current);
+          }
+          manualFeedbackTimerRef.current = window.setTimeout(() => {
+            if (unmounted) return;
+            manualReconnectStartRef.current = 0;
+            setManualReconnecting(false);
+            setStatus((prev) => (prev === "live" ? "reconnecting" : "error"));
+            const nowStr = new Date().toLocaleTimeString("zh-CN", {
+              hour12: false,
+              hour: "2-digit",
+              minute: "2-digit",
+              second: "2-digit",
+            });
+            setManualRetryFeedback(`已于 ${nowStr} 重试，仍未连接成功`);
+          }, remain);
+        }
         onStatusChange?.(camera.id, false);
         reconnectTimer = window.setTimeout(connect, 2200);
       };
@@ -433,6 +593,10 @@ export function StreamTile({
       wsRef.current = null;
       window.clearInterval(fpsTimer);
       if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      if (manualFeedbackTimerRef.current) {
+        window.clearTimeout(manualFeedbackTimerRef.current);
+        manualFeedbackTimerRef.current = undefined;
+      }
       try {
         ws?.close();
       } catch {}
@@ -526,16 +690,40 @@ export function StreamTile({
 
   const isRecording = Boolean(recordingState?.active);
   const isManualRecording = isRecording && recordingState?.mode === "manual";
-  const isChannelFull406 = errorText.includes("406") || errorText.includes("通道连接数已满");
+  const issueInfo = describeStreamIssue(errorText);
+  const isChannelFull406 = issueInfo.isChannelFull;
+  const isConnected = hasFrame && status === "live";
   const raised = dragging || lifted;
+
+  function handleManualReconnect(e: React.MouseEvent) {
+    e.stopPropagation();
+    if (manualReconnecting || rebooting) return;
+    if (manualFeedbackTimerRef.current) {
+      window.clearTimeout(manualFeedbackTimerRef.current);
+      manualFeedbackTimerRef.current = undefined;
+    }
+    manualReconnectPendingRef.current = true;
+    manualReconnectStartRef.current = Date.now();
+    setManualReconnecting(true);
+    setManualRetryFeedback("");
+    setStatus("connecting");
+    setErrorText("");
+    setReloadNonce((n) => n + 1);
+  }
 
   async function handleRebootClick(e: React.MouseEvent) {
     e.stopPropagation();
     if (!onRebootCamera || rebooting) return;
     setRebooting(true);
+    setManualRetryFeedback("");
     try {
       await onRebootCamera(camera);
-      window.setTimeout(() => setReloadNonce((n) => n + 1), 6000);
+      window.setTimeout(() => {
+        manualReconnectPendingRef.current = true;
+        manualReconnectStartRef.current = Date.now();
+        setManualReconnecting(true);
+        setReloadNonce((n) => n + 1);
+      }, 6000);
     } finally {
       setRebooting(false);
     }
@@ -580,7 +768,7 @@ export function StreamTile({
         }}
         onClick={() => {
           if (Date.now() - lastDragTimeRef.current < 260) return;
-          if (!isModalView && onOpenZoom) {
+          if (isConnected && !isModalView && onOpenZoom) {
             onOpenZoom(camera);
           }
         }}
@@ -610,31 +798,50 @@ export function StreamTile({
           <div className="camera-tile__overlay" onClick={(e) => e.stopPropagation()}>
             <div className="camera-tile__overlay-card">
               <p className="camera-tile__overlay-title">
-                {isChannelFull406
-                  ? "摄像头内部通道已占满 (406)"
+                {rebooting
+                  ? "正在重启摄像头…"
+                  : manualReconnecting
+                  ? "正在重新连接摄像头…"
                   : status === "connecting" || status === "live"
                   ? "正在加载实时画面…"
-                  : errorText || "视频流重连中…"}
+                  : issueInfo.title}
               </p>
+              <p className="camera-tile__overlay-hint">
+                {rebooting
+                  ? "重启大约需要 6 秒，完成后将自动恢复画面"
+                  : manualReconnecting
+                  ? `正在尝试连接 ${camera.ip}，请稍候…`
+                  : status === "connecting" || status === "live"
+                  ? `正在连接 ${camera.ip}…`
+                  : issueInfo.hint}
+              </p>
+              {manualRetryFeedback && !manualReconnecting && !rebooting && (
+                <span className="camera-tile__retry-feedback" role="status" aria-live="polite">
+                  {manualRetryFeedback}
+                </span>
+              )}
               <div className="camera-tile__overlay-actions">
-                {isChannelFull406 && onRebootCamera && (
+                {isChannelFull406 && !manualReconnecting && onRebootCamera && (
                   <button
                     type="button"
                     className="tile-action-btn tile-action-btn--warn"
                     disabled={rebooting}
                     onClick={handleRebootClick}
                   >
-                    <RotateCcw size={13} />
+                    <RotateCcw size={13} className={rebooting ? "spin-icon" : ""} />
                     <span>{rebooting ? "正在重启摄像头…" : "一键重启释放通道"}</span>
                   </button>
                 )}
                 <button
                   type="button"
-                  className="tile-action-btn"
-                  onClick={() => setReloadNonce((n) => n + 1)}
+                  className={`tile-action-btn ${
+                    manualReconnecting ? "tile-action-btn--loading" : ""
+                  }`}
+                  disabled={manualReconnecting || rebooting}
+                  onClick={handleManualReconnect}
                 >
-                  <RefreshCw size={13} />
-                  <span>立即重连</span>
+                  <RefreshCw size={13} className={manualReconnecting ? "spin-icon" : ""} />
+                  <span>{manualReconnecting ? "正在重连…" : "立即重连"}</span>
                 </button>
               </div>
             </div>
@@ -661,12 +868,12 @@ export function StreamTile({
           type="button"
           className="camera-tile__identity"
           title={`${camera.name} (${camera.ip})${
-            isRecording ? " · 正在录制 1080P+音频" : ""
+            isRecording ? " · 正在录制 1080P+音频" : !isConnected ? " · 未连接" : ""
           } · 按住可拖拽排序，方向键可移动`}
           aria-label={`${camera.name}，位置 ${index + 1} / ${count}。按方向键可调整排序。`}
           onClick={() => {
             if (Date.now() - lastDragTimeRef.current < 260) return;
-            if (!isModalView && onOpenZoom) {
+            if (isConnected && !isModalView && onOpenZoom) {
               onOpenZoom(camera);
             }
           }}
@@ -695,140 +902,120 @@ export function StreamTile({
                 : "connecting"
             }`}
           />
-          {!isModalView && draggableCard && (
-            <span className="camera-tile__position">
-              <span className="sr-only">{String(index + 1).padStart(2, "0")}</span>
-              <AnimatePresence mode="popLayout" initial={false} custom={direction}>
-                <motion.span
-                  key={reduced ? "static" : index}
-                  aria-hidden="true"
-                  className="camera-tile__digits"
-                  custom={direction}
-                  variants={rollVariants}
-                  initial={reduced ? false : "enter"}
-                  animate="center"
-                  exit={reduced ? undefined : "exit"}
-                  transition={{
-                    duration: reduced ? 0 : motionTokens.duration.standard,
-                    ease: [...motionTokens.ease.enter],
-                  }}
-                >
-                  {String(index + 1).padStart(2, "0")}
-                </motion.span>
-              </AnimatePresence>
-            </span>
-          )}
           <span className="camera-tile__name">{camera.name}</span>
           <span className="camera-tile__ip">{camera.ip}</span>
         </button>
 
-        <div
-          className={`camera-tile__controls ${
-            audioEnabled || talkActive || isManualRecording
-              ? "camera-tile__controls--active"
-              : ""
-          }`}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <button
-            type="button"
-            className={`tile-ctrl-btn ${audioEnabled ? "tile-ctrl-btn--active" : ""}`}
-            onClick={() => onToggleAudio(camera.id)}
-            title={audioEnabled ? "关闭该房间声音监听" : "开启该房间声音监听"}
-            aria-label={audioEnabled ? `关闭 ${camera.name} 声音监听` : `开启 ${camera.name} 声音监听`}
-          >
-            {audioEnabled ? <Volume2 size={13} /> : <VolumeX size={13} />}
-            <span className="tile-ctrl-btn__label">
-              {audioEnabled ? "监听中" : "监听"}
-            </span>
-          </button>
-
-          {cameraSupportsTalk(camera) && (
-            <>
-              <button
-                type="button"
-                className={`tile-ctrl-btn ${
-                  talkActive && talkMode === "toggle" ? "tile-ctrl-btn--talk" : ""
-                }`}
-                onClick={() => onToggleTalk(camera)}
-                title="点击开启或挂断持续双向语音对讲"
-                aria-label={`与 ${camera.name} 双向通话`}
-              >
-                {talkActive && talkMode === "toggle" ? (
-                  <PhoneOff size={13} />
-                ) : (
-                  <PhoneCall size={13} />
-                )}
-                <span className="tile-ctrl-btn__label">
-                  {talkActive && talkMode === "toggle" ? "挂断" : "通话"}
-                </span>
-              </button>
-
-              <button
-                type="button"
-                className={`tile-ctrl-btn ${
-                  talkActive && talkMode === "ptt" ? "tile-ctrl-btn--talk" : ""
-                }`}
-                onPointerDown={(e) => {
-                  if (e.button !== 0) return;
-                  e.stopPropagation();
-                  e.currentTarget.setPointerCapture(e.pointerId);
-                  onStartPTT(camera);
-                }}
-                onPointerUp={(e) => {
-                  if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-                    e.currentTarget.releasePointerCapture(e.pointerId);
-                  }
-                  onStopPTT(camera);
-                }}
-                onPointerCancel={() => {
-                  if (talkActive && talkMode === "ptt") onStopPTT(camera);
-                }}
-                onLostPointerCapture={() => {
-                  if (talkActive && talkMode === "ptt") onStopPTT(camera);
-                }}
-                title="按住说话，松开结束对讲"
-                aria-label={`按住对 ${camera.name} 说话`}
-              >
-                <Mic size={13} />
-                <span className="tile-ctrl-btn__label">
-                  {talkActive && talkMode === "ptt" ? "讲话中" : "按住讲"}
-                </span>
-              </button>
-            </>
-          )}
-
-          <button
-            type="button"
-            className={`tile-ctrl-btn ${
-              isManualRecording ? "tile-ctrl-btn--rec" : ""
+        {isConnected && (
+          <div
+            className={`camera-tile__controls ${
+              audioEnabled || talkActive || isManualRecording
+                ? "camera-tile__controls--active"
+                : ""
             }`}
-            onClick={() => onToggleManualRecord(camera, isManualRecording)}
-            title={
-              isManualRecording
-                ? "点击停止手动录像并保存 MP4"
-                : "点击立即手动录制 1080P 高清画面 + 声音"
-            }
-            aria-label={`录制 ${camera.name} 1080P 视频`}
+            onClick={(e) => e.stopPropagation()}
           >
-            {isManualRecording ? <Square size={12} /> : <Video size={13} />}
-            <span className="tile-ctrl-btn__label">
-              {isManualRecording ? "停录" : "录像"}
-            </span>
-          </button>
-
-          {!isModalView && onOpenZoom && (
             <button
               type="button"
-              className="tile-zoom-btn"
-              onClick={() => onOpenZoom(camera)}
-              title="放大查看 1080P 高清主码流"
-              aria-label={`放大查看 ${camera.name}`}
+              className={`tile-ctrl-btn ${audioEnabled ? "tile-ctrl-btn--active" : ""}`}
+              onClick={() => onToggleAudio(camera.id)}
+              title={audioEnabled ? "关闭该房间声音监听" : "开启该房间声音监听"}
+              aria-label={audioEnabled ? `关闭 ${camera.name} 声音监听` : `开启 ${camera.name} 声音监听`}
             >
-              <Maximize2 size={13} />
+              {audioEnabled ? <Volume2 size={13} /> : <VolumeX size={13} />}
+              <span className="tile-ctrl-btn__label">
+                {audioEnabled ? "监听中" : "监听"}
+              </span>
             </button>
-          )}
-        </div>
+
+            {cameraSupportsTalk(camera) && (
+              <>
+                <button
+                  type="button"
+                  className={`tile-ctrl-btn ${
+                    talkActive && talkMode === "toggle" ? "tile-ctrl-btn--talk" : ""
+                  }`}
+                  onClick={() => onToggleTalk(camera)}
+                  title="点击开启或挂断持续双向语音对讲"
+                  aria-label={`与 ${camera.name} 双向通话`}
+                >
+                  {talkActive && talkMode === "toggle" ? (
+                    <PhoneOff size={13} />
+                  ) : (
+                    <PhoneCall size={13} />
+                  )}
+                  <span className="tile-ctrl-btn__label">
+                    {talkActive && talkMode === "toggle" ? "挂断" : "通话"}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  className={`tile-ctrl-btn ${
+                    talkActive && talkMode === "ptt" ? "tile-ctrl-btn--talk" : ""
+                  }`}
+                  onPointerDown={(e) => {
+                    if (e.button !== 0) return;
+                    e.stopPropagation();
+                    e.currentTarget.setPointerCapture(e.pointerId);
+                    onStartPTT(camera);
+                  }}
+                  onPointerUp={(e) => {
+                    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+                      e.currentTarget.releasePointerCapture(e.pointerId);
+                    }
+                    onStopPTT(camera);
+                  }}
+                  onPointerCancel={() => {
+                    if (talkActive && talkMode === "ptt") onStopPTT(camera);
+                  }}
+                  onLostPointerCapture={() => {
+                    if (talkActive && talkMode === "ptt") onStopPTT(camera);
+                  }}
+                  title="按住说话，松开结束对讲"
+                  aria-label={`按住对 ${camera.name} 说话`}
+                >
+                  <Mic size={13} />
+                  <span className="tile-ctrl-btn__label">
+                    {talkActive && talkMode === "ptt" ? "讲话中" : "按住讲"}
+                  </span>
+                </button>
+              </>
+            )}
+
+            <button
+              type="button"
+              className={`tile-ctrl-btn ${
+                isManualRecording ? "tile-ctrl-btn--rec" : ""
+              }`}
+              onClick={() => onToggleManualRecord(camera, isManualRecording)}
+              title={
+                isManualRecording
+                  ? "点击停止手动录像并保存 MP4"
+                  : "点击立即手动录制 1080P 高清画面 + 声音"
+              }
+              aria-label={`录制 ${camera.name} 1080P 视频`}
+            >
+              {isManualRecording ? <Square size={12} /> : <Video size={13} />}
+              <span className="tile-ctrl-btn__label">
+                {isManualRecording ? "停录" : "录像"}
+              </span>
+            </button>
+
+            {!isModalView && onOpenZoom && (
+              <button
+                type="button"
+                className="tile-ctrl-btn"
+                onClick={() => onOpenZoom(camera)}
+                title="放大查看 1080P 高清主码流"
+                aria-label={`放大查看 ${camera.name}`}
+              >
+                <Maximize2 size={13} />
+                <span className="tile-ctrl-btn__label">全屏</span>
+              </button>
+            )}
+          </div>
+        )}
       </div>
     </motion.article>
   );

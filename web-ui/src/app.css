@@ -697,12 +697,21 @@ body:has([role="dialog"]) {
   flex-shrink: 0;
   font-variant-numeric: tabular-nums;
   opacity: 0;
-  transition: opacity var(--duration-fast) var(--ease-standard);
+  translate: 0 -4px;
+  scale: 0.98;
+  transition:
+    opacity 220ms cubic-bezier(0.22, 1, 0.36, 1) 0ms,
+    translate 220ms cubic-bezier(0.22, 1, 0.36, 1) 0ms,
+    scale 220ms cubic-bezier(0.22, 1, 0.36, 1) 0ms;
 }
 
 .camera-tile:hover .fps-pill,
+.camera-tile:focus-within .fps-pill,
 .camera-tile--modal .fps-pill {
   opacity: 1;
+  translate: 0 0;
+  scale: 1;
+  transition-delay: 70ms;
 }
 
 .camera-tile__overlay {
@@ -719,14 +728,37 @@ body:has([role="dialog"]) {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: var(--space-2);
+  gap: 0.3rem;
+  max-width: 90%;
   text-align: center;
 }
 
 .camera-tile__overlay-title {
   margin: 0;
   font-size: var(--text-xs);
-  color: oklch(92% 0 0);
+  font-weight: 600;
+  color: oklch(95% 0 0);
+  text-wrap: balance;
+}
+
+.camera-tile__overlay-hint {
+  margin: 0;
+  font-size: 0.68rem;
+  line-height: 1.35;
+  color: oklch(76% 0 0);
+  text-wrap: pretty;
+}
+
+.camera-tile__retry-feedback {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.14rem 0.5rem;
+  border-radius: var(--radius-pill);
+  background: oklch(26% 0.04 55 / 0.72);
+  border: 1px solid oklch(68% 0.14 55 / 0.45);
+  color: oklch(90% 0.08 75);
+  font-size: 0.64rem;
+  font-variant-numeric: tabular-nums;
 }
 
 .camera-tile__overlay-actions {
@@ -734,24 +766,61 @@ body:has([role="dialog"]) {
   flex-wrap: wrap;
   justify-content: center;
   gap: 0.35rem;
+  margin-top: 0.15rem;
 }
 
 .tile-action-btn {
   display: inline-flex;
   align-items: center;
   gap: 0.3rem;
-  padding: 0.28rem 0.6rem;
+  padding: 0.28rem 0.65rem;
   border-radius: var(--radius-pill);
-  border: 1px solid oklch(100% 0 0 / 0.2);
-  background: oklch(24% 0 0 / 0.9);
+  border: 1px solid oklch(100% 0 0 / 0.22);
+  background: oklch(24% 0 0 / 0.92);
   color: oklch(96% 0 0);
   font-size: 0.7rem;
   cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard),
+    transform var(--duration-fast) var(--ease-standard);
+}
+
+.tile-action-btn:hover:not(:disabled) {
+  background: oklch(32% 0 0 / 0.96);
+  border-color: oklch(100% 0 0 / 0.38);
+}
+
+.tile-action-btn:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+.tile-action-btn:disabled {
+  cursor: wait;
+  opacity: 0.88;
+}
+
+.tile-action-btn--loading {
+  border-color: color-mix(in oklab, var(--primary) 65%, oklch(100% 0 0 / 0.25));
+  background: color-mix(in oklab, var(--primary) 26%, oklch(22% 0 0 / 0.92));
 }
 
 .tile-action-btn--warn {
   background: color-mix(in oklab, var(--warning) 35%, oklch(20% 0 0));
   border-color: var(--warning);
+}
+
+.spin-icon {
+  animation: tile-icon-spin 0.85s linear infinite;
+}
+
+@keyframes tile-icon-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* Unified Single-Row Card Footer: Identity on Left + Smart Actions on Right */
@@ -771,26 +840,34 @@ body:has([role="dialog"]) {
   right: 0;
   bottom: 0;
   z-index: 4;
-  padding: 0.22rem 0.28rem;
+  padding: 0.52rem 0.32rem 0.22rem;
   border-top: none;
   background: transparent;
   pointer-events: none;
-  transition:
-    background var(--duration-fast) var(--ease-standard),
-    padding var(--duration-fast) var(--ease-standard);
 }
 
-.camera-tile:not(.camera-tile--modal):hover .camera-tile__footer,
-.camera-tile:not(.camera-tile--modal):focus-within .camera-tile__footer,
-.camera-tile--listening:not(.camera-tile--modal) .camera-tile__footer,
-.camera-tile--talking:not(.camera-tile--modal) .camera-tile__footer {
-  padding: 0.55rem 0.34rem 0.2rem;
+.camera-tile:not(.camera-tile--modal) .camera-tile__footer::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
   background: linear-gradient(
     to top,
     oklch(6% 0 0 / 0.88) 0%,
     oklch(8% 0 0 / 0.48) 65%,
     transparent 100%
   );
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 220ms cubic-bezier(0.22, 1, 0.36, 1) 0ms;
+}
+
+.camera-tile:not(.camera-tile--modal):hover .camera-tile__footer::before,
+.camera-tile:not(.camera-tile--modal):focus-within .camera-tile__footer::before,
+.camera-tile--listening:not(.camera-tile--modal) .camera-tile__footer::before,
+.camera-tile--talking:not(.camera-tile--modal) .camera-tile__footer::before {
+  opacity: 1;
+  transition-delay: 70ms;
 }
 
 .camera-tile:not(.camera-tile--modal) .camera-tile__identity,
@@ -800,23 +877,23 @@ body:has([role="dialog"]) {
 
 .camera-tile:not(.camera-tile--modal) .camera-tile__identity {
   flex: 0 1 auto;
-  max-width: 78%;
-  padding: 0.08rem 0.38rem;
+  min-width: 0;
+  padding: 0.08rem 0.36rem;
   border-radius: var(--radius-pill);
-  background: oklch(8% 0 0 / 0.58);
+  background: oklch(8% 0 0 / 0.56);
   backdrop-filter: blur(4px);
+  transition:
+    background-color 220ms cubic-bezier(0.22, 1, 0.36, 1) 0ms,
+    backdrop-filter 220ms cubic-bezier(0.22, 1, 0.36, 1) 0ms;
 }
 
 .camera-tile:not(.camera-tile--modal):hover .camera-tile__identity,
 .camera-tile:not(.camera-tile--modal):focus-within .camera-tile__identity,
 .camera-tile--listening:not(.camera-tile--modal) .camera-tile__identity,
 .camera-tile--talking:not(.camera-tile--modal) .camera-tile__identity {
-  flex: 1 1 0%;
-  max-width: none;
-  padding: 0.1rem 0.15rem;
-  border-radius: 0.35rem;
-  background: transparent;
-  backdrop-filter: none;
+  background: oklch(8% 0 0 / 0);
+  backdrop-filter: blur(0px);
+  transition-delay: 70ms;
 }
 
 .camera-tile:not(.camera-tile--modal) .camera-tile__name {
@@ -825,36 +902,57 @@ body:has([role="dialog"]) {
 }
 
 .camera-tile:not(.camera-tile--modal) .camera-tile__position {
-  display: none;
-  background: oklch(18% 0 0 / 0.78);
+  display: grid;
+  background: oklch(18% 0 0 / 0.72);
   color: oklch(88% 0 0);
 }
 
-.camera-tile:not(.camera-tile--modal):hover .camera-tile__position,
-.camera-tile:not(.camera-tile--modal):focus-within .camera-tile__position,
-.camera-tile[data-lifted]:not(.camera-tile--modal) .camera-tile__position {
-  display: grid;
+.camera-tile:not(.camera-tile--modal) .camera-tile__ip {
+  max-width: 0;
+  margin-left: -0.32rem;
+  overflow: hidden;
+  opacity: 0;
+  translate: -4px 0;
+  transition:
+    max-width 220ms cubic-bezier(0.22, 1, 0.36, 1) 0ms,
+    margin-left 220ms cubic-bezier(0.22, 1, 0.36, 1) 0ms,
+    opacity 220ms cubic-bezier(0.22, 1, 0.36, 1) 0ms,
+    translate 220ms cubic-bezier(0.22, 1, 0.36, 1) 0ms;
 }
 
-.camera-tile:not(.camera-tile--modal):not(:hover):not(:focus-within) .camera-tile__ip {
-  display: none !important;
+.camera-tile:not(.camera-tile--modal):hover .camera-tile__ip,
+.camera-tile:not(.camera-tile--modal):focus-within .camera-tile__ip {
+  max-width: 7.5rem;
+  margin-left: 0;
+  opacity: 1;
+  translate: 0 0;
+  transition-delay: 70ms;
+}
+
+.camera-tile:not(.camera-tile--modal) .camera-tile__controls {
+  translate: 0 0;
+  scale: 1;
 }
 
 .camera-tile:not(.camera-tile--modal)
   .camera-tile__controls:not(.camera-tile__controls--active) {
   opacity: 0;
   pointer-events: none;
-  transform: translateY(2px);
+  translate: 0 6px;
+  scale: 0.985;
   transition:
-    opacity var(--duration-fast) var(--ease-standard),
-    transform var(--duration-fast) var(--ease-standard);
+    opacity 220ms cubic-bezier(0.22, 1, 0.36, 1) 0ms,
+    translate 220ms cubic-bezier(0.22, 1, 0.36, 1) 0ms,
+    scale 220ms cubic-bezier(0.22, 1, 0.36, 1) 0ms;
 }
 
 .camera-tile:not(.camera-tile--modal):hover .camera-tile__controls,
 .camera-tile:not(.camera-tile--modal):focus-within .camera-tile__controls {
   opacity: 1;
   pointer-events: auto;
-  transform: translateY(0);
+  translate: 0 0;
+  scale: 1;
+  transition-delay: 70ms;
 }
 
 .camera-tile__identity {
@@ -983,9 +1081,14 @@ body:has([role="dialog"]) {
   cursor: pointer;
   -webkit-user-select: none;
   user-select: none;
-  transition: background var(--duration-fast) var(--ease-standard),
-    color var(--duration-fast) var(--ease-standard),
-    border-color var(--duration-fast) var(--ease-standard);
+  translate: 0 0;
+  scale: 1;
+  transition:
+    background 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    color 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    translate 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    scale 140ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 /* In compact cards (<350px), keep idle buttons as clean icon pills so the room name is 100% readable;
@@ -1015,6 +1118,11 @@ body:has([role="dialog"]) {
 .tile-ctrl-btn:hover {
   background: var(--control-track-hover);
   color: var(--foreground);
+  translate: 0 -1px;
+}
+
+.tile-ctrl-btn:active {
+  scale: 0.95;
 }
 
 .tile-ctrl-btn--active {
@@ -1046,11 +1154,23 @@ body:has([role="dialog"]) {
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
+  translate: 0 0;
+  scale: 1;
+  transition:
+    background 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    color 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    translate 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    scale 140ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .tile-zoom-btn:hover {
   background: var(--surface-muted);
   color: var(--foreground);
+  translate: 0 -1px;
+}
+
+.tile-zoom-btn:active {
+  scale: 0.94;
 }
 
 /* Playback & Device Management Common Containers */

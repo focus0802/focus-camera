@@ -1665,17 +1665,22 @@ func main() {
 		})
 	})
 
-	// 5. WebSocket: Video + Audio Live Stream (/ws/stream?id=...&stream=sub|main&audio=0|1)
+	// 5. WebSocket: Video + Audio Live Stream (/ws/stream?id=...&stream=sub|main&audio=0|1&reconnect=0|1)
 	mux.HandleFunc("/ws/stream", func(w http.ResponseWriter, r *http.Request) {
 		camID := r.URL.Query().Get("id")
 		streamType := r.URL.Query().Get("stream")
 		wantAudio := r.URL.Query().Get("audio") == "1"
+		forceReconnect := r.URL.Query().Get("reconnect") == "1"
 
 		ws, err := upgradeWebSocket(w, r)
 		if err != nil {
 			return
 		}
 		defer ws.Close()
+
+		if forceReconnect {
+			hub.ReconnectCamera(camID, streamType)
+		}
 
 		sub, unsubscribe, err := hub.Subscribe(camID, streamType, wantAudio)
 		if err != nil {
@@ -1703,8 +1708,13 @@ func main() {
 						Action string `json:"action"`
 						Enable bool   `json:"enable"`
 					}
-					if json.Unmarshal(payload, &cmd) == nil && cmd.Action == "audio" {
-						hub.SetSubscriberAudio(camID, streamType, sub.ID, cmd.Enable)
+					if json.Unmarshal(payload, &cmd) == nil {
+						switch cmd.Action {
+						case "audio":
+							hub.SetSubscriberAudio(camID, streamType, sub.ID, cmd.Enable)
+						case "reconnect":
+							hub.ReconnectCamera(camID, streamType)
+						}
 					}
 				}
 			}

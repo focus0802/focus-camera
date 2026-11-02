@@ -1240,7 +1240,7 @@ export function App() {
             variant="ghost"
             size="sm"
             onClick={() => openSystemSettings("general")}
-            title={`系统设置（开机自启 · 录像与存储策略 · 版本 ${updateStatus?.current_version || "v2.4.1"}）`}
+            title={`系统设置（开机自启 · 录像与存储策略 · 版本 ${updateStatus?.current_version || "v2.4.2"}）`}
           >
             <Settings size={14} />
             <span>系统设置</span>

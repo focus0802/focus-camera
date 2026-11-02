@@ -612,15 +612,25 @@ func (m *Manager) runWorker(w *activeWorker) {
 				}
 			case rtsp.MsgTypeStatusJSON:
 				var st struct {
+					Status  string `json:"status"`
+					Error   string `json:"error"`
 					State   string `json:"state"`
 					Message string `json:"message"`
 				}
 				if err := json.Unmarshal(pkt[1:], &st); err == nil {
+					errText := st.Error
+					if errText == "" {
+						errText = st.Message
+					}
+					statusVal := st.Status
+					if statusVal == "" {
+						statusVal = st.State
+					}
 					w.mu.Lock()
-					if st.State == "error" && st.Message != "" {
-						w.lastErr = st.Message
-					} else if st.State == "streaming" {
+					if statusVal == "online" || statusVal == "streaming" {
 						w.lastErr = ""
+					} else if errText != "" {
+						w.lastErr = errText
 					}
 					w.mu.Unlock()
 				}

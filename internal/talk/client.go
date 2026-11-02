@@ -46,6 +46,23 @@ func between(s, sub1, sub2 string) string {
 	return s[:j]
 }
 
+func humanizeTalkNetError(err error) string {
+	if err == nil {
+		return ""
+	}
+	lower := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(lower, "connection refused") || strings.Contains(lower, "actively refused"):
+		return "摄像头拒绝语音连接，设备可能正在重启或不支持双向对讲"
+	case strings.Contains(lower, "no route to host") || strings.Contains(lower, "host is down") || strings.Contains(lower, "unreachable"):
+		return "摄像头离线或网络不通，请检查电源与网线连接"
+	case strings.Contains(lower, "i/o timeout") || strings.Contains(lower, "timed out") || strings.Contains(lower, "timeout") || strings.Contains(lower, "did not properly respond") || strings.Contains(lower, "failed to respond"):
+		return "无法连接摄像头语音通道，请确认设备在线"
+	default:
+		return "摄像头语音对讲连接中断，请重试"
+	}
+}
+
 func DialTalkSession(ip string, port int, username, password string) (*Session, error) {
 	if port == 0 {
 		port = 8800
@@ -53,27 +70,27 @@ func DialTalkSession(ip string, port int, username, password string) (*Session, 
 	host := fmt.Sprintf("%s:%d", ip, port)
 	conn, err := net.DialTimeout("tcp", host, 3*time.Second)
 	if err != nil {
-		return nil, fmt.Errorf("连接对讲端口 %s 失败: %w", host, err)
+		return nil, errors.New(humanizeTalkNetError(err))
 	}
 
 	req1, err := http.NewRequest("POST", "http://"+host+"/stream", nil)
 	if err != nil {
 		_ = conn.Close()
-		return nil, err
+		return nil, errors.New(humanizeTalkNetError(err))
 	}
 	req1.Header.Set("Content-Type", "multipart/mixed; boundary=--client-stream-boundary--")
 
 	_ = conn.SetDeadline(time.Now().Add(4 * time.Second))
 	if err := req1.Write(conn); err != nil {
 		_ = conn.Close()
-		return nil, err
+		return nil, errors.New(humanizeTalkNetError(err))
 	}
 
 	br := bufio.NewReader(conn)
 	res1, err := http.ReadResponse(br, req1)
 	if err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("读取对讲握手响应失败: %w", err)
+		return nil, errors.New(humanizeTalkNetError(err))
 	}
 
 	// Case 1: Older firmware (e.g. TL-IPC42A-Focus FW 1.0.x) returns 200 OK immediately!
@@ -85,7 +102,7 @@ func DialTalkSession(ip string, port int, username, password string) (*Session, 
 		auth := res1.Header.Get("WWW-Authenticate")
 		if !strings.HasPrefix(auth, "Digest") {
 			_ = conn.Close()
-			return nil, fmt.Errorf("不支持的对讲鉴权方式: %s", auth)
+			return nil, errors.New("该摄像头不支持标准双向对讲协议")
 		}
 
 		encPwd := discovery.SecurityEncode(password)
@@ -127,27 +144,27 @@ func DialTalkSession(ip string, port int, username, password string) (*Session, 
 			_ = conn.Close()
 			conn, err = net.DialTimeout("tcp", host, 3*time.Second)
 			if err != nil {
-				return nil, fmt.Errorf("重连对讲端口失败: %w", err)
+				return nil, errors.New(humanizeTalkNetError(err))
 			}
 			_ = conn.SetDeadline(time.Now().Add(4 * time.Second))
 			if err := req2.Write(conn); err != nil {
 				_ = conn.Close()
-				return nil, err
+				return nil, errors.New(humanizeTalkNetError(err))
 			}
 			br = bufio.NewReader(conn)
 			res2, err = http.ReadResponse(br, req2)
 			if err != nil {
 				_ = conn.Close()
-				return nil, fmt.Errorf("读取鉴权后响应失败: %w", err)
+				return nil, errors.New(humanizeTalkNetError(err))
 			}
 		}
 		if res2.StatusCode != http.StatusOK {
 			_ = conn.Close()
-			return nil, fmt.Errorf("对讲鉴权被拒绝: %s", res2.Status)
+			return nil, errors.New("摄像头密码验证未通过，请在「设备管理」中核对密码")
 		}
 	} else if res1.StatusCode != http.StatusOK {
 		_ = conn.Close()
-		return nil, fmt.Errorf("对讲连接异常状态: %s", res1.Status)
+		return nil, errors.New("摄像头语音对讲服务暂不可用")
 	}
 
 	// Send talk session request
@@ -161,14 +178,14 @@ func DialTalkSession(ip string, port int, username, password string) (*Session, 
 
 	if _, err := conn.Write(reqBuf.Bytes()); err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("发送对讲请求失败: %w", err)
+		return nil, errors.New(humanizeTalkNetError(err))
 	}
 
 	mpReader := multipart.NewReader(br, "--device-stream-boundary--")
 	part, err := mpReader.NextRawPart()
 	if err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("未收到摄像头对讲会话回应: %w", err)
+		return nil, errors.New("未收到摄像头语音回应，请稍后重试")
 	}
 
 	var talkResp struct {
@@ -179,11 +196,11 @@ func DialTalkSession(ip string, port int, username, password string) (*Session, 
 	}
 	if err := json.NewDecoder(part).Decode(&talkResp); err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("解析对讲会话回应失败: %w", err)
+		return nil, errors.New("摄像头语音协议响应异常，请重试")
 	}
 	if talkResp.Params.ErrorCode != 0 || talkResp.Params.SessionID == "" {
 		_ = conn.Close()
-		return nil, fmt.Errorf("摄像头拒绝开启对讲 (可能是通道被占用, error_code=%d)", talkResp.Params.ErrorCode)
+		return nil, errors.New("摄像头语音通道正在被占用，请稍后再试")
 	}
 
 	// Clear read/write deadline for continuous streaming

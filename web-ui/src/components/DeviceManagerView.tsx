@@ -877,11 +877,12 @@ export function DeviceManagerView({
         }
         if (recState?.last_error) {
           const errMsg = recState.last_error;
-          const shortLabel = errMsg.includes("401")
-            ? "密码鉴权失败"
-            : errMsg.includes("406")
-              ? "通道已占满"
-              : "离线 / 重连中";
+          const shortLabel =
+            errMsg.includes("401") || errMsg.includes("密码")
+              ? "密码验证失败"
+              : errMsg.includes("406") || errMsg.includes("占满")
+                ? "通道已占满"
+                : "离线 / 重连中";
           return (
             <div className="device-rec-cell" title={errMsg}>
               <Badge tone="warning" size="sm">
