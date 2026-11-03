@@ -169,6 +169,7 @@ type AppConfig struct {
 	UpdateURL        string          `json:"update_url"`
 	AutoStartEnabled bool            `json:"auto_start_enabled"`
 	AutoStartMode    string          `json:"auto_start_mode"`
+	AutoTimeSync     *bool           `json:"auto_time_sync,omitempty"`
 	Recording        RecordingConfig `json:"recording"`
 	Cameras          []Camera        `json:"cameras"`
 }
@@ -707,6 +708,42 @@ func (s *Store) SetAutoStart(enabled bool, mode string) error {
 	s.cfg.AutoStartEnabled = enabled
 	s.cfg.AutoStartMode = NormalizeAutoStartMode(mode)
 	return s.save()
+}
+
+func (s *Store) GetAutoTimeSync() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.cfg.AutoTimeSync == nil {
+		return true
+	}
+	return *s.cfg.AutoTimeSync
+}
+
+func (s *Store) SetAutoTimeSync(enabled bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v := enabled
+	s.cfg.AutoTimeSync = &v
+	return s.save()
+}
+
+func (s *Store) SetCameraName(id, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	for i := range s.cfg.Cameras {
+		if s.cfg.Cameras[i].ID == id || s.cfg.Cameras[i].IP == id {
+			if s.cfg.Cameras[i].Name == name {
+				return nil
+			}
+			s.cfg.Cameras[i].Name = name
+			return s.save()
+		}
+	}
+	return nil
 }
 
 func InferSupportsPTZFromModel(model string) bool {

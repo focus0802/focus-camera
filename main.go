@@ -330,6 +330,28 @@ func main() {
 		updMgr.CheckSilent()
 	}()
 
+	// Background automatic camera hardware clock synchronization (on startup + every 6 hours)
+	go func() {
+		time.Sleep(5 * time.Second)
+		runSilentTimeSync := func(reason string) {
+			if !store.GetAutoTimeSync() {
+				return
+			}
+			cfg := store.GetConfig()
+			if len(cfg.Cameras) == 0 {
+				return
+			}
+			res := discovery.BatchSyncCamerasTime(cfg.Cameras, cfg.DefaultUsername, cfg.DefaultPassword)
+			log.Printf("[TimeSync] %s自动校时完成: 成功 %d / 共 %d 台 (失败 %d 台)", reason, res.Succeeded, res.Total, res.Failed)
+		}
+		runSilentTimeSync("启动")
+		ticker := time.NewTicker(6 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			runSilentTimeSync("定时巡检")
+		}
+	}()
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
@@ -699,7 +721,7 @@ func main() {
 		})
 	})
 
-	// 1e. API: Query & Configure OS Auto-Start on Boot/Login
+	// 1e. API: Query & Configure OS Auto-Start on Boot/Login + Auto Time Sync
 	mux.HandleFunc("/api/autostart", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		switch r.Method {
@@ -707,41 +729,65 @@ func main() {
 			enabled, mode := store.GetAutoStart()
 			st := autostart.GetStatus(enabled, mode)
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"ok":     true,
-				"status": st,
+				"ok":             true,
+				"status":         st,
+				"auto_time_sync": store.GetAutoTimeSync(),
 			})
 		case http.MethodPost, http.MethodPut:
 			var req struct {
-				Enabled bool   `json:"enabled"`
-				Mode    string `json:"mode"`
+				Enabled      *bool  `json:"enabled"`
+				Mode         string `json:"mode"`
+				AutoTimeSync *bool  `json:"auto_time_sync"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			normMode := config.NormalizeAutoStartMode(req.Mode)
-			st, err := autostart.Apply(req.Enabled, normMode)
-			if err != nil {
-				w.WriteHeader(http.StatusBadRequest)
+			if req.AutoTimeSync != nil {
+				_ = store.SetAutoTimeSync(*req.AutoTimeSync)
+			}
+			curEnabled, curMode := store.GetAutoStart()
+			if req.Enabled == nil && req.Mode == "" {
 				_ = json.NewEncoder(w).Encode(map[string]any{
-					"ok":     false,
-					"error":  err.Error(),
-					"status": st,
+					"ok":             true,
+					"status":         autostart.GetStatus(curEnabled, curMode),
+					"auto_time_sync": store.GetAutoTimeSync(),
 				})
 				return
 			}
-			if err := store.SetAutoStart(req.Enabled, normMode); err != nil {
+			nextEnabled := curEnabled
+			if req.Enabled != nil {
+				nextEnabled = *req.Enabled
+			}
+			normMode := curMode
+			if req.Mode != "" {
+				normMode = config.NormalizeAutoStartMode(req.Mode)
+			}
+			st, err := autostart.Apply(nextEnabled, normMode)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"ok":             false,
+					"error":          err.Error(),
+					"status":         st,
+					"auto_time_sync": store.GetAutoTimeSync(),
+				})
+				return
+			}
+			if err := store.SetAutoStart(nextEnabled, normMode); err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				_ = json.NewEncoder(w).Encode(map[string]any{
-					"ok":     false,
-					"error":  err.Error(),
-					"status": st,
+					"ok":             false,
+					"error":          err.Error(),
+					"status":         st,
+					"auto_time_sync": store.GetAutoTimeSync(),
 				})
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"ok":     true,
-				"status": autostart.GetStatus(req.Enabled, normMode),
+				"ok":             true,
+				"status":         autostart.GetStatus(nextEnabled, normMode),
+				"auto_time_sync": store.GetAutoTimeSync(),
 			})
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1378,6 +1424,261 @@ func main() {
 
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	resolveCameraCreds := func(id, ip, reqUser, reqPass string, reqNoPass bool) (resolvedCam config.Camera, hasCam bool, finalIP, finalUser, finalPass string) {
+		cfg := store.GetConfig()
+		finalIP = strings.TrimSpace(ip)
+		finalUser = strings.TrimSpace(reqUser)
+		finalPass = reqPass
+
+		if id != "" {
+			resolvedCam, hasCam = store.GetCamera(id)
+		}
+		if !hasCam && finalIP != "" {
+			resolvedCam, hasCam = store.GetCamera(finalIP)
+		}
+		if hasCam {
+			if finalIP == "" {
+				finalIP = resolvedCam.IP
+			}
+			if finalUser == "" {
+				finalUser = resolvedCam.Username
+			}
+			if finalPass == "" && !reqNoPass && !resolvedCam.NoPassword {
+				finalPass = resolvedCam.Password
+			}
+		}
+		if finalUser == "" {
+			finalUser = cfg.DefaultUsername
+		}
+		if finalPass == "" && !reqNoPass && (!hasCam || !resolvedCam.NoPassword) {
+			finalPass = cfg.DefaultPassword
+		}
+		return
+	}
+
+	// 3e. API: Read Camera Hardware OSD & System Clock Status
+	mux.HandleFunc("/api/cameras/osd-time", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		q := r.URL.Query()
+		_, _, ip, user, pass := resolveCameraCreds(
+			strings.TrimSpace(q.Get("id")),
+			strings.TrimSpace(q.Get("ip")),
+			strings.TrimSpace(q.Get("username")),
+			q.Get("password"),
+			q.Get("no_password") == "true",
+		)
+		if ip == "" {
+			http.Error(w, `{"ok":false,"error":"缺少摄像头 IP 参数"}`, http.StatusBadRequest)
+			return
+		}
+		payload, err := discovery.GetCameraOSDAndTime(ip, user, pass)
+		if err != nil {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok":       false,
+				"protocol": payload.Protocol,
+				"osd":      payload.OSD,
+				"time":     payload.Time,
+				"error":    err.Error(),
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":       true,
+			"protocol": payload.Protocol,
+			"osd":      payload.OSD,
+			"time":     payload.Time,
+		})
+	})
+
+	// 3f. API: Modify Camera Hardware OSD (Custom Text Overlay, Date/Week Stamp, Position)
+	mux.HandleFunc("/api/cameras/osd", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if r.Method != http.MethodPost && r.Method != http.MethodPut {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			ID             string  `json:"id"`
+			IP             string  `json:"ip"`
+			Username       string  `json:"username"`
+			Password       string  `json:"password"`
+			NoPassword     bool    `json:"no_password"`
+			LabelEnabled   *bool   `json:"label_enabled"`
+			LabelText      *string `json:"label_text"`
+			Label2Enabled  *bool   `json:"label2_enabled"`
+			Label2Text     *string `json:"label2_text"`
+			DateEnabled    *bool   `json:"date_enabled"`
+			WeekEnabled    *bool   `json:"week_enabled"`
+			Position       string  `json:"position"`
+			SyncDevAlias   *bool   `json:"sync_dev_alias"`
+			SyncCameraName bool    `json:"sync_camera_name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		cam, hasCam, ip, user, pass := resolveCameraCreds(req.ID, req.IP, req.Username, req.Password, req.NoPassword)
+		if ip == "" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok":    false,
+				"error": "缺少摄像头 IP 参数",
+			})
+			return
+		}
+		updatedOSD, err := discovery.SetCameraOSD(ip, user, pass, discovery.SetOSDRequest{
+			LabelEnabled:  req.LabelEnabled,
+			LabelText:     req.LabelText,
+			Label2Enabled: req.Label2Enabled,
+			Label2Text:    req.Label2Text,
+			DateEnabled:   req.DateEnabled,
+			WeekEnabled:   req.WeekEnabled,
+			Position:      req.Position,
+			SyncDevAlias:  req.SyncDevAlias,
+		})
+		if err != nil {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok":    false,
+				"osd":   updatedOSD,
+				"error": err.Error(),
+			})
+			return
+		}
+		if req.SyncCameraName && hasCam && req.LabelText != nil {
+			if nextName := strings.TrimSpace(*req.LabelText); nextName != "" {
+				_ = store.SetCameraName(cam.ID, nextName)
+			}
+		}
+		updCfg := store.GetConfig()
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":      true,
+			"osd":     updatedOSD,
+			"cameras": updCfg.Cameras,
+		})
+	})
+
+	// 3g. API: Sync Camera Hardware System Time (Host Time or Custom Time + Optional NTP)
+	mux.HandleFunc("/api/cameras/time", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if r.Method != http.MethodPost && r.Method != http.MethodPut {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			ID         string `json:"id"`
+			IP         string `json:"ip"`
+			Username   string `json:"username"`
+			Password   string `json:"password"`
+			NoPassword bool   `json:"no_password"`
+			DateTime   string `json:"datetime"` // optional custom "YYYY-MM-DD HH:MM:SS"
+			EnableNTP  *bool  `json:"enable_ntp"`
+			NTPServer  string `json:"ntp_server"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		_, _, ip, user, pass := resolveCameraCreds(req.ID, req.IP, req.Username, req.Password, req.NoPassword)
+		if ip == "" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok":    false,
+				"error": "缺少摄像头 IP 参数",
+			})
+			return
+		}
+
+		targetTime := time.Now()
+		if dtStr := strings.TrimSpace(req.DateTime); dtStr != "" {
+			parsedOK := false
+			for _, layout := range []string{
+				"2006-01-02 15:04:05",
+				"2006-01-02T15:04:05",
+				"2006-01-02 15:04",
+				"2006-01-02T15:04",
+				time.RFC3339,
+			} {
+				if t, err := time.ParseInLocation(layout, dtStr, time.Local); err == nil {
+					targetTime = t
+					parsedOK = true
+					break
+				}
+			}
+			if !parsedOK {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"ok":    false,
+					"error": "自定义时间格式无效，请使用 YYYY-MM-DD HH:MM:SS 格式",
+				})
+				return
+			}
+		}
+
+		timeSt, err := discovery.SyncCameraTime(ip, user, pass, targetTime, req.EnableNTP, req.NTPServer)
+		if err != nil {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok":    false,
+				"time":  timeSt,
+				"error": err.Error(),
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":   true,
+			"time": timeSt,
+		})
+	})
+
+	// 3h. API: Batch Camera Maintenance (Batch Time Sync & Batch OSD Name Sync)
+	mux.HandleFunc("/api/cameras/batch-maint", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Action string   `json:"action"` // "sync_time" | "sync_osd_names"
+			IDs    []string `json:"ids,omitempty"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		cfg := store.GetConfig()
+		targetCams := cfg.Cameras
+		if len(req.IDs) > 0 {
+			idSet := make(map[string]bool, len(req.IDs))
+			for _, id := range req.IDs {
+				idSet[strings.TrimSpace(id)] = true
+			}
+			filtered := make([]config.Camera, 0, len(req.IDs))
+			for _, c := range cfg.Cameras {
+				if idSet[c.ID] || idSet[c.IP] {
+					filtered = append(filtered, c)
+				}
+			}
+			targetCams = filtered
+		}
+
+		switch strings.ToLower(strings.TrimSpace(req.Action)) {
+		case "sync_time":
+			res := discovery.BatchSyncCamerasTime(targetCams, cfg.DefaultUsername, cfg.DefaultPassword)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok":     true,
+				"result": res,
+			})
+		case "sync_osd_names":
+			res := discovery.BatchSyncCamerasOSDNames(targetCams, cfg.DefaultUsername, cfg.DefaultPassword)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok":     true,
+				"result": res,
+			})
+		default:
+			http.Error(w, `{"ok":false,"error":"未知的批量操作类型"}`, http.StatusBadRequest)
 		}
 	})
 

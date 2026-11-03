@@ -58,6 +58,59 @@ export interface CameraNetworkConfig {
   dns?: string;
 }
 
+export type OSDPositionPreset =
+  | "keep"
+  | "top_left"
+  | "bottom_left"
+  | "top_right"
+  | "bottom_right"
+  | "custom";
+
+export interface CameraOSDConfig {
+  label_enabled: boolean;
+  label_text: string;
+  label_x?: string;
+  label_y?: string;
+  label2_enabled: boolean;
+  label2_text: string;
+  label2_x?: string;
+  label2_y?: string;
+  date_enabled: boolean;
+  date_x?: string;
+  date_y?: string;
+  week_enabled: boolean;
+  position_preset?: OSDPositionPreset;
+  dev_alias?: string;
+}
+
+export interface CameraTimeStatus {
+  camera_time: string;
+  camera_unix: number;
+  host_time: string;
+  host_unix: number;
+  drift_seconds: number;
+  timezone: string;
+  timing_mode: "ntp" | "manual" | string;
+  ntp_server?: string;
+}
+
+export interface BatchItemResult {
+  id: string;
+  name: string;
+  ip: string;
+  ok: boolean;
+  detail?: string;
+  error?: string;
+}
+
+export interface BatchMaintResult {
+  action: "sync_time" | "sync_osd_names" | string;
+  total: number;
+  succeeded: number;
+  failed: number;
+  items: BatchItemResult[];
+}
+
 export function cameraSupportsTalk(camera?: Camera | null): boolean {
   if (!camera) return false;
   if (camera.supports_talk === true || camera.talk_port === 8800) {

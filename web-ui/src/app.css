@@ -3346,3 +3346,158 @@ body:has([role="dialog"]) {
   gap: 0.35rem;
   flex-shrink: 0;
 }
+
+/* Camera OSD Overlay & Hardware Clock Sync Styles */
+.ptz-panel__header > div,
+.ptz-panel__header > div > div {
+  width: 100%;
+}
+
+.ptz-panel__header button {
+  flex: 1 1 0%;
+  justify-content: center;
+  text-align: center;
+  padding: 0 0.5rem !important;
+}
+
+.ptz-osd-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.ptz-osd-section,
+.ptz-time-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.38rem;
+  padding: 0.45rem 0.65rem;
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  border: 1px solid var(--border-subtle);
+}
+
+.ptz-osd-section > div {
+  gap: 0.22rem !important;
+}
+
+.ptz-osd-section input {
+  min-height: 1.85rem !important;
+  height: 1.85rem !important;
+  padding: 0 0.6rem !important;
+  font-size: var(--text-xs) !important;
+}
+
+.ptz-osd-section label {
+  font-size: 0.68rem !important;
+}
+
+.ptz-osd-switches {
+  display: grid !important;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.3rem 0.35rem !important;
+  padding-top: 0.1rem;
+}
+
+.ptz-osd-switches > button {
+  min-height: 1.5rem !important;
+  gap: 0.32rem !important;
+  font-size: 0.7rem !important;
+  text-align: left !important;
+  white-space: nowrap !important;
+  justify-content: flex-start !important;
+}
+
+.ptz-osd-switches > button > span:first-child {
+  transform: scale(0.82);
+  transform-origin: left center;
+  margin-right: -0.35rem;
+}
+
+.ptz-pos-actions {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0.3rem;
+}
+
+.ptz-corner-hint {
+  font-size: 0.66rem;
+  color: var(--text-muted);
+}
+
+.ptz-time-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.4rem 0.55rem;
+  border-radius: var(--radius-control);
+  background: var(--surface-muted);
+  border: 1px solid var(--border-subtle);
+  font-size: 0.7rem;
+}
+
+.ptz-time-meta__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.ptz-time-meta__row span {
+  color: var(--text-muted);
+}
+
+.ptz-time-meta__row code {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.ptz-time-actions-row {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.ptz-time-actions-row > button:first-child {
+  flex: 1;
+  justify-content: center;
+}
+
+.ptz-status-line--error {
+  color: var(--danger);
+  white-space: normal;
+  line-height: 1.35;
+}
+
+.hw-network-box__grid--3col {
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1.15fr) minmax(0, 0.95fr);
+}
+
+@media (max-width: 720px) {
+  .hw-network-box__grid--3col {
+    grid-template-columns: 1fr;
+  }
+}
+
+.hw-osd-switches {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-4);
+  padding-top: var(--space-1);
+}
+
+.manual-cam-form {
+  max-height: calc(88vh - 5rem);
+  overflow-y: auto;
+  padding-right: 0.15rem;
+}
+
+.settings-section-card__desc {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}

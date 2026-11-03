@@ -619,6 +619,68 @@ func TestDeviceManagementInvariants(t *testing.T) {
 	}
 }
 
+func TestCameraOSDAndTimeSyncConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := config.NewStore(filepath.Join(tmpDir, "cameras.json"))
+	if err != nil {
+		t.Fatalf("NewStore err: %v", err)
+	}
+
+	// Default AutoTimeSync should be true
+	if !store.GetAutoTimeSync() {
+		t.Fatalf("Expected GetAutoTimeSync() to default to true")
+	}
+	if err := store.SetAutoTimeSync(false); err != nil {
+		t.Fatalf("SetAutoTimeSync(false) err: %v", err)
+	}
+	if store.GetAutoTimeSync() {
+		t.Fatalf("Expected GetAutoTimeSync() to be false after SetAutoTimeSync(false)")
+	}
+	if err := store.SetAutoTimeSync(true); err != nil {
+		t.Fatalf("SetAutoTimeSync(true) err: %v", err)
+	}
+	if !store.GetAutoTimeSync() {
+		t.Fatalf("Expected GetAutoTimeSync() to be true after SetAutoTimeSync(true)")
+	}
+
+	// Verify SetCameraName updates local camera Name cleanly
+	_, _, err = store.BatchUpsertCameras([]config.Camera{
+		{Name: "旧名称", IP: "192.0.2.150"},
+	}, "192.0.2", "admin", "unit-test-pass")
+	if err != nil {
+		t.Fatalf("BatchUpsertCameras err: %v", err)
+	}
+	camID := config.MakeID("192.0.2.150")
+	if err := store.SetCameraName(camID, "一楼音乐厅"); err != nil {
+		t.Fatalf("SetCameraName err: %v", err)
+	}
+	cam, ok := store.GetCamera(camID)
+	if !ok || cam.Name != "一楼音乐厅" {
+		t.Fatalf("Expected camera Name='一楼音乐厅', got %+v", cam)
+	}
+
+	// Verify right-aligned TP-LINK OSD X coordinate calculation
+	if got := discovery.RightAlignedTPLinkX("15号琴房"); got != "8350" {
+		t.Fatalf("Expected RightAlignedTPLinkX('15号琴房') == '8350', got %s", got)
+	}
+	if got := discovery.RightAlignedTPLinkX("2号多媒体教室"); got != "7600" {
+		t.Fatalf("Expected RightAlignedTPLinkX('2号多媒体教室') == '7600', got %s", got)
+	}
+
+	// Verify validation on empty IP for OSD/Time calls
+	if _, err := discovery.GetCameraOSDAndTime("", "admin", "unit-test-pass"); err == nil {
+		t.Fatalf("Expected GetCameraOSDAndTime to reject empty IP")
+	}
+	labelText := "Test"
+	if _, err := discovery.SetCameraOSD("", "admin", "unit-test-pass", discovery.SetOSDRequest{LabelText: &labelText}); err == nil {
+		t.Fatalf("Expected SetCameraOSD to reject empty IP")
+	}
+	if _, err := discovery.SyncCameraTime("", "admin", "unit-test-pass", time.Now(), nil, ""); err == nil {
+		t.Fatalf("Expected SyncCameraTime to reject empty IP")
+	}
+}
+
+
 
 
 

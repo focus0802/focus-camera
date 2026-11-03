@@ -72,10 +72,11 @@ export function SystemSettingsModal({
   onCheckUpdate,
   onApplyUpdate,
 }: SystemSettingsModalProps) {
-  // 1. Auto-Start State
+  // 1. Auto-Start & Auto-Time-Sync State
   const [autoStartStatus, setAutoStartStatus] = useState<AutoStartStatus | null>(
     null
   );
+  const [autoTimeSync, setAutoTimeSync] = useState<boolean>(true);
   const [savingAutoStart, setSavingAutoStart] = useState<boolean>(false);
   const [autoStartMsg, setAutoStartMsg] = useState<{
     ok: boolean;
@@ -120,6 +121,9 @@ export function SystemSettingsModal({
       const data = await res.json();
       if (data.ok && data.status) {
         setAutoStartStatus(data.status as AutoStartStatus);
+      }
+      if (typeof data.auto_time_sync === "boolean") {
+        setAutoTimeSync(data.auto_time_sync);
       }
     } catch {
       // ignore transient errors
@@ -171,18 +175,23 @@ export function SystemSettingsModal({
 
   async function handleUpdateAutoStart(
     nextEnabled: boolean,
-    nextMode: AutoStartMode
+    nextMode: AutoStartMode,
+    nextAutoTimeSync?: boolean
   ) {
     setSavingAutoStart(true);
     setAutoStartMsg(null);
     try {
+      const payload: Record<string, unknown> = {
+        enabled: nextEnabled,
+        mode: nextMode,
+      };
+      if (typeof nextAutoTimeSync === "boolean") {
+        payload.auto_time_sync = nextAutoTimeSync;
+      }
       const res = await fetch("/api/autostart", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          enabled: nextEnabled,
-          mode: nextMode,
-        }),
+        body: JSON.stringify(payload),
       });
       const contentType = res.headers.get("content-type") || "";
       if (!contentType.includes("application/json")) {
@@ -196,17 +205,20 @@ export function SystemSettingsModal({
       if (data.status) {
         setAutoStartStatus(data.status as AutoStartStatus);
       }
+      if (typeof data.auto_time_sync === "boolean") {
+        setAutoTimeSync(data.auto_time_sync);
+      }
       if (!res.ok || !data.ok) {
         setAutoStartMsg({
           ok: false,
-          text: data.error || "更新开机自启动设置失败",
+          text: data.error || "更新系统设置失败",
         });
         return;
       }
     } catch {
       setAutoStartMsg({
         ok: false,
-        text: "请求开机自启动接口失败",
+        text: "请求系统设置接口失败",
       });
     } finally {
       setSavingAutoStart(false);
@@ -370,6 +382,27 @@ export function SystemSettingsModal({
                         </code>
                       </div>
                     )}
+                  </div>
+
+                  <div className="settings-section-card">
+                    <div className="settings-section-card__head">
+                      <Switch
+                        checked={autoTimeSync}
+                        disabled={savingAutoStart}
+                        onCheckedChange={(checked) => {
+                          setAutoTimeSync(checked);
+                          void handleUpdateAutoStart(
+                            currentEnabled,
+                            currentMode,
+                            checked
+                          );
+                        }}
+                        label="启动时与后台每 6 小时自动校准全部摄像头时间"
+                      />
+                    </div>
+                    <p className="settings-section-card__desc">
+                      针对封闭局域网无互联网 NTP 或断电后硬件时钟归零的情况，自动把本机电脑当前时间写入全部在线摄像头的机身时钟，确保画面时间水印与录像时间轴一致。
+                    </p>
                   </div>
 
                   {autoStartStatus?.warning && (

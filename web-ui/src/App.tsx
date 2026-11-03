@@ -20,6 +20,7 @@ import {
   Video,
   VideoOff,
   VolumeX,
+  Type,
   X,
 } from "lucide-react";
 import {
@@ -34,7 +35,7 @@ import {
 } from "./types";
 import { TalkbackSession } from "./lib/audio";
 import { StreamTile } from "./components/StreamTile";
-import { PTZControlPanel } from "./components/PTZControlPanel";
+import { PTZControlPanel, type ZoomSideTab } from "./components/PTZControlPanel";
 import { PlaybackView } from "./components/PlaybackView";
 import { DeviceManagerView } from "./components/DeviceManagerView";
 import { SystemSettingsModal } from "./components/SystemSettingsModal";
@@ -259,13 +260,15 @@ export function App() {
   const talkSessionRef = useRef<TalkbackSession | null>(null);
   const talkMetaRef = useRef<{ cameraId: string; mode: "toggle" | "ptt" } | null>(null);
 
-  // 1080P Zoom Modal & PTZ State
+  // 1080P Zoom Modal & PTZ / OSD State
   const [zoomCamera, setZoomCamera] = useState<Camera | null>(null);
   const [zoomAudioEnabled, setZoomAudioEnabled] = useState<boolean>(true);
   const [ptzPanelOpen, setPtzPanelOpen] = useState<boolean>(true);
+  const [zoomSideTab, setZoomSideTab] = useState<ZoomSideTab>("ptz");
 
   const handleOpenZoom = useCallback((camera: Camera) => {
     setZoomAudioEnabled(true);
+    setZoomSideTab(camera.supports_ptz === false ? "osd" : "ptz");
     setZoomCamera(camera);
   }, []);
 
@@ -320,7 +323,13 @@ export function App() {
     try {
       const res = await fetch("/api/cameras");
       const data = await res.json();
-      setCameras(data.cameras || []);
+      const nextCams: Camera[] = data.cameras || [];
+      setCameras(nextCams);
+      setZoomCamera((prev) => {
+        if (!prev) return null;
+        const found = nextCams.find((c) => c.id === prev.id);
+        return found ? { ...prev, ...found } : prev;
+      });
       if (data.default_subnet) {
         setDefaultSubnet(data.default_subnet);
       }
@@ -1662,7 +1671,10 @@ export function App() {
                 {ptzPanelOpen && (
                   <PTZControlPanel
                     camera={zoomCamera}
+                    activeTab={zoomSideTab}
+                    onTabChange={setZoomSideTab}
                     onPresetsUpdated={handlePresetsUpdated}
+                    onCameraUpdated={fetchCameras}
                   />
                 )}
               </div>
@@ -1727,13 +1739,45 @@ export function App() {
 
                 <div className="zoom-intercom-bar__right">
                   <Button
-                    variant={ptzPanelOpen ? "primary" : "secondary"}
+                    variant={
+                      ptzPanelOpen && zoomSideTab === "ptz"
+                        ? "primary"
+                        : "secondary"
+                    }
                     size="md"
-                    onClick={() => setPtzPanelOpen((v) => !v)}
+                    onClick={() => {
+                      if (ptzPanelOpen && zoomSideTab === "ptz") {
+                        setPtzPanelOpen(false);
+                      } else {
+                        setZoomSideTab("ptz");
+                        setPtzPanelOpen(true);
+                      }
+                    }}
                     title="展开或收起右侧云台控制面板"
                   >
                     <Compass size={16} />
                     <span>云台控制</span>
+                  </Button>
+
+                  <Button
+                    variant={
+                      ptzPanelOpen && zoomSideTab === "osd"
+                        ? "primary"
+                        : "secondary"
+                    }
+                    size="md"
+                    onClick={() => {
+                      if (ptzPanelOpen && zoomSideTab === "osd") {
+                        setPtzPanelOpen(false);
+                      } else {
+                        setZoomSideTab("osd");
+                        setPtzPanelOpen(true);
+                      }
+                    }}
+                    title="实时修改摄像头画面 OSD 文字水印、时间戳显示或同步时间"
+                  >
+                    <Type size={16} />
+                    <span>画面文字与校时</span>
                   </Button>
 
                   {(() => {

@@ -6,21 +6,28 @@ import {
   Edit3,
   Plus,
   Radar,
+  RefreshCw,
   RotateCcw,
   Save,
   Trash2,
+  Type,
   Video,
   VideoOff,
   X,
 } from "lucide-react";
 import type {
+  BatchMaintResult,
   Camera,
   CameraNetworkConfig,
+  CameraOSDConfig,
+  CameraTimeStatus,
   DiscoveredCamera,
+  OSDPositionPreset,
   RecordingConfig,
   RecordingState,
 } from "../types";
 import { VendorIcon, VENDOR_PRESETS, getVendorMeta } from "./VendorIcon";
+import { formatTimeDriftLabel } from "./PTZControlPanel";
 import { Input } from "./arc/input/input";
 import { PasswordField } from "./arc/password-field/password-field";
 import { MorphSelect } from "./arc/morph-select/morph-select";
@@ -191,6 +198,18 @@ export function DeviceManagerView({
   const [hwGateway, setHwGateway] = useState<string>("192.168.1.1");
   const [hwNetInfo, setHwNetInfo] = useState<CameraNetworkConfig | null>(null);
   const [loadingHwNet, setLoadingHwNet] = useState<boolean>(false);
+  const [syncHardwareOSD, setSyncHardwareOSD] = useState<boolean>(false);
+  const [loadingHwOSDTime, setLoadingHwOSDTime] = useState<boolean>(false);
+  const [hwTimeInfo, setHwTimeInfo] = useState<CameraTimeStatus | null>(null);
+  const [syncingModalTime, setSyncingModalTime] = useState<boolean>(false);
+  const [osdLabelEnabled, setOsdLabelEnabled] = useState<boolean>(true);
+  const [osdLabelText, setOsdLabelText] = useState<string>("");
+  const [osdLabelTouched, setOsdLabelTouched] = useState<boolean>(false);
+  const [osdLabel2Enabled, setOsdLabel2Enabled] = useState<boolean>(false);
+  const [osdLabel2Text, setOsdLabel2Text] = useState<string>("");
+  const [osdDateEnabled, setOsdDateEnabled] = useState<boolean>(true);
+  const [osdWeekEnabled, setOsdWeekEnabled] = useState<boolean>(false);
+  const [osdPosition, setOsdPosition] = useState<OSDPositionPreset>("keep");
   const [savingManualCam, setSavingManualCam] = useState<boolean>(false);
   const [customGroupMode, setCustomGroupMode] = useState<boolean>(false);
   const [probingModalCam, setProbingModalCam] = useState<boolean>(false);
@@ -203,6 +222,10 @@ export function DeviceManagerView({
   const [deletingCam, setDeletingCam] = useState<boolean>(false);
   const [confirmClearAllOpen, setConfirmClearAllOpen] = useState<boolean>(false);
   const [clearingAll, setClearingAll] = useState<boolean>(false);
+  const [syncingAllTime, setSyncingAllTime] = useState<boolean>(false);
+  const [confirmSyncOSDModalOpen, setConfirmSyncOSDModalOpen] =
+    useState<boolean>(false);
+  const [syncingAllOSD, setSyncingAllOSD] = useState<boolean>(false);
 
   useEffect(() => {
     setPage(1);
@@ -830,6 +853,169 @@ export function DeviceManagerView({
     }
   }
 
+  async function fetchCameraOSDAndTime(
+    camId?: string,
+    ip?: string,
+    username?: string,
+    password?: string,
+    fallbackName?: string
+  ) {
+    const targetIP = (ip || "").trim();
+    if (!targetIP) return;
+    setLoadingHwOSDTime(true);
+    try {
+      const qs = new URLSearchParams({
+        ip: targetIP,
+        ...(camId ? { id: camId } : {}),
+        ...(username ? { username } : {}),
+        ...(password ? { password } : {}),
+      });
+      const res = await fetch(`/api/cameras/osd-time?${qs.toString()}`);
+      const data = await res.json();
+      if (data.osd) {
+        const o: CameraOSDConfig = data.osd;
+        setOsdLabelEnabled(Boolean(o.label_enabled));
+        setOsdLabelText(o.label_text || fallbackName || "");
+        const l2On = Boolean(o.label2_enabled);
+        const rawL2 = (o.label2_text || "").trim();
+        const isPlaceholderL2 =
+          !l2On ||
+          rawL2 === "自定义字符1" ||
+          rawL2 === "自定义字符2" ||
+          rawL2 === "自定义字符3" ||
+          rawL2 === "Custom String 1";
+        setOsdLabel2Enabled(l2On && !isPlaceholderL2);
+        setOsdLabel2Text(isPlaceholderL2 ? "" : rawL2);
+        setOsdDateEnabled(Boolean(o.date_enabled));
+        setOsdWeekEnabled(Boolean(o.week_enabled));
+        setOsdPosition("keep");
+      }
+      if (data.time && data.time.camera_time) {
+        setHwTimeInfo(data.time as CameraTimeStatus);
+      } else {
+        setHwTimeInfo(null);
+      }
+    } catch {
+      setHwTimeInfo(null);
+    } finally {
+      setLoadingHwOSDTime(false);
+    }
+  }
+
+  async function handleSyncModalCameraTime() {
+    if (!editingCam || !editingCam.ip?.trim()) return;
+    const targetIP =
+      isEditMode && syncHardwareIP && originalIP
+        ? originalIP
+        : editingCam.ip.trim();
+    setSyncingModalTime(true);
+    setModalProbeMsg(null);
+    try {
+      const res = await fetch("/api/cameras/time", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: editingCam.id,
+          ip: targetIP,
+          username: editingCam.username?.trim() || "admin",
+          password: editingCam.password || "",
+          no_password: Boolean(editingCam.no_password),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        setModalProbeMsg({
+          ok: false,
+          text: data.error || "同步摄像头机身时间失败",
+        });
+        return;
+      }
+      if (data.time) {
+        setHwTimeInfo(data.time as CameraTimeStatus);
+      }
+      setModalProbeMsg({
+        ok: true,
+        text: `已将摄像头硬件时间与本机同步 (${data.time?.camera_time || "刚刚"})`,
+      });
+    } catch {
+      setModalProbeMsg({
+        ok: false,
+        text: "请求校时接口失败",
+      });
+    } finally {
+      setSyncingModalTime(false);
+    }
+  }
+
+  async function handleBatchSyncAllTime() {
+    if (cameras.length === 0) return;
+    setSyncingAllTime(true);
+    setBanner(null);
+    try {
+      const res = await fetch("/api/cameras/batch-maint", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "sync_time" }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok || !data.result) {
+        throw new Error(data.error || "批量校时请求失败");
+      }
+      const r: BatchMaintResult = data.result;
+      setBanner({
+        tone: r.succeeded > 0 ? (r.failed > 0 ? "info" : "success") : "warning",
+        title: `全网校时完成：成功同步 ${r.succeeded} / ${r.total} 台摄像头硬件时钟至本机当前时间`,
+        detail:
+          r.failed > 0
+            ? `有 ${r.failed} 台设备暂未响应（可能处于断电离线或待验证密码状态）`
+            : undefined,
+      });
+    } catch (err) {
+      setBanner({
+        tone: "danger",
+        title: "全网批量校时失败",
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setSyncingAllTime(false);
+    }
+  }
+
+  async function handleBatchSyncAllOSDNames() {
+    if (cameras.length === 0) return;
+    setSyncingAllOSD(true);
+    setBanner(null);
+    try {
+      const res = await fetch("/api/cameras/batch-maint", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "sync_osd_names" }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok || !data.result) {
+        throw new Error(data.error || "批量写入画面名称失败");
+      }
+      const r: BatchMaintResult = data.result;
+      setConfirmSyncOSDModalOpen(false);
+      setBanner({
+        tone: r.succeeded > 0 ? (r.failed > 0 ? "info" : "success") : "warning",
+        title: `画面 OSD 名称同步完成：成功写入 ${r.succeeded} / ${r.total} 台摄像头的硬件画面文字`,
+        detail:
+          r.failed > 0
+            ? `有 ${r.failed} 台设备暂未响应（可能处于断电离线或该型号不支持远程 OSD 设置）`
+            : undefined,
+      });
+    } catch (err) {
+      setBanner({
+        tone: "danger",
+        title: "批量同步画面名称失败",
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setSyncingAllOSD(false);
+    }
+  }
+
   async function handleProbeModalCamera() {
     if (!editingCam || !editingCam.ip?.trim()) return;
     setProbingModalCam(true);
@@ -903,7 +1089,15 @@ export function DeviceManagerView({
         targetProbeIP,
         editingCam.username?.trim() || "admin",
         data.password ?? editingCam.password
-      );
+      ).finally(() => {
+        void fetchCameraOSDAndTime(
+          editingCam.id,
+          targetProbeIP,
+          editingCam.username?.trim() || "admin",
+          data.password ?? editingCam.password,
+          data.suggested_name || editingCam.name
+        );
+      });
       setModalProbeMsg({
         ok: true,
         text: `验证成功，已读取设备名称：「${data.suggested_name}」(${data.device_model || "RTSP IPC"})`,
@@ -937,7 +1131,47 @@ export function DeviceManagerView({
         ip: nextIP,
       };
       let hardwareIPUpdated = false;
+      let hardwareOSDUpdated = false;
 
+      // 1. Write OSD watermark first while camera is still listening on its original IP
+      // (before a hardware static IP change restarts the camera's network interface).
+      if (isEditMode && syncHardwareOSD) {
+        const targetOSDIP =
+          syncHardwareIP && originalIP ? originalIP : updatedCam.ip || nextIP;
+        const finalLabelText =
+          osdLabelText.trim() || updatedCam.name?.trim() || "";
+        const osdRes = await fetch("/api/cameras/osd", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            id: updatedCam.id,
+            ip: targetOSDIP,
+            username: editingCam.username?.trim() || "admin",
+            password: editingCam.password || "",
+            no_password: Boolean(editingCam.no_password),
+            label_enabled: osdLabelEnabled,
+            label_text: finalLabelText,
+            label2_enabled: osdLabel2Enabled,
+            label2_text: osdLabel2Text.trim(),
+            date_enabled: osdDateEnabled,
+            week_enabled: osdWeekEnabled,
+            position: osdPosition,
+          }),
+        });
+        const osdData = await osdRes.json();
+        if (!osdRes.ok || !osdData.ok) {
+          setModalProbeMsg({
+            ok: false,
+            text:
+              osdData.error ||
+              "修改摄像头画面 OSD 文字失败（若仅需修改软件内名称，可关闭「同步修改机身画面 OSD 水印」开关）",
+          });
+          return;
+        }
+        hardwareOSDUpdated = true;
+      }
+
+      // 2. Apply hardware static IP change if requested
       if (isEditMode && syncHardwareIP && originalIP) {
         const ipChanged = nextIP !== originalIP;
         const maskChanged =
@@ -969,7 +1203,7 @@ export function DeviceManagerView({
               ok: false,
               text:
                 netData.error ||
-                "修改摄像头硬件静态 IP 失败（若仅需修改软件本地记录，可关闭「同步写入摄像头机身硬件静态 IP」开关）",
+                "修改摄像头硬件静态 IP 失败（若仅需修改软件本地记录，可关闭「同步修改机身硬件静态 IP」开关）",
             });
             return;
           }
@@ -985,10 +1219,17 @@ export function DeviceManagerView({
       await onSaveCamera(updatedCam, isEditMode);
       setEditingCam(null);
       setModalProbeMsg(null);
-      if (hardwareIPUpdated) {
+      if (hardwareIPUpdated || hardwareOSDUpdated) {
         setBanner({
           tone: "success",
-          title: `静态 IP 已更新：${originalIP} → ${updatedCam.ip}`,
+          title: [
+            hardwareIPUpdated ? `静态 IP 已更新 (${originalIP} → ${updatedCam.ip})` : "",
+            hardwareOSDUpdated
+              ? `画面 OSD 水印已更新为「${osdLabelText.trim() || updatedCam.name}」`
+              : "",
+          ]
+            .filter(Boolean)
+            .join(" · "),
         });
       }
     } catch (err) {
@@ -1210,6 +1451,16 @@ export function DeviceManagerView({
               setHwNetmask("255.255.255.0");
               setHwGateway(inferGatewayFromIP(row.ip));
               setHwNetInfo(null);
+              setSyncHardwareOSD(false);
+              setHwTimeInfo(null);
+              setOsdLabelEnabled(true);
+              setOsdLabelText(row.name || "");
+              setOsdLabelTouched(false);
+              setOsdLabel2Enabled(false);
+              setOsdLabel2Text("");
+              setOsdDateEnabled(true);
+              setOsdWeekEnabled(false);
+              setOsdPosition("keep");
               setCustomGroupMode(false);
               setModalProbeMsg(null);
               setEditingCam({
@@ -1226,7 +1477,15 @@ export function DeviceManagerView({
                 row.ip,
                 row.username,
                 row.password
-              );
+              ).finally(() => {
+                void fetchCameraOSDAndTime(
+                  row.id,
+                  row.ip,
+                  row.username,
+                  row.password,
+                  row.name
+                );
+              });
             }}
             aria-label={`编辑 ${row.name}`}
           >
@@ -1715,6 +1974,27 @@ export function DeviceManagerView({
                 <span>排序</span>
               </Button>
             )}
+            <Button
+              variant="secondary"
+              size="sm"
+              loading={syncingAllTime}
+              disabled={cameras.length === 0}
+              onClick={() => void handleBatchSyncAllTime()}
+              title="一键将全部在线摄像头的机身硬件时钟同步为当前电脑时间"
+            >
+              <RefreshCw size={14} />
+              <span>一键校时</span>
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={cameras.length === 0}
+              onClick={() => setConfirmSyncOSDModalOpen(true)}
+              title="一键将列表中的「设备名称」批量写入各台摄像头的画面 OSD 水印中"
+            >
+              <Type size={14} />
+              <span>同步画面名称</span>
+            </Button>
             <Button variant="secondary" size="sm" onClick={onOpenSettingsModal}>
               <Clock size={14} />
               <span>录像存储</span>
@@ -1727,6 +2007,8 @@ export function DeviceManagerView({
                 setOriginalIP("");
                 setSyncHardwareIP(false);
                 setHwNetInfo(null);
+                setSyncHardwareOSD(false);
+                setHwTimeInfo(null);
                 setCustomGroupMode(false);
                 setModalProbeMsg(null);
                 setEditingCam({
@@ -1915,7 +2197,14 @@ export function DeviceManagerView({
                 <Input
                   label="设备名称"
                   value={editingCam.name || ""}
-                  onChange={(e) => setEditingCam({ ...editingCam, name: e.target.value })}
+                  onChange={(e) => {
+                    const nextName = e.target.value;
+                    if (isEditMode && !osdLabelTouched) {
+                      setOsdLabelText(nextName);
+                      setSyncHardwareOSD(true);
+                    }
+                    setEditingCam({ ...editingCam, name: nextName });
+                  }}
                   placeholder="留空则自动读取"
                 />
                 {customGroupMode ? (
@@ -2109,6 +2398,103 @@ export function DeviceManagerView({
                 </div>
               )}
 
+              {isEditMode && (
+                <div className="hw-network-box">
+                  <div className="hw-network-box__head">
+                    <Switch
+                      checked={syncHardwareOSD}
+                      onCheckedChange={setSyncHardwareOSD}
+                      label="同步修改机身画面 OSD 水印"
+                    />
+                    <div className="hw-network-box__badges">
+                      {loadingHwOSDTime ? (
+                        <Badge tone="neutral" size="sm">
+                          读取画面与时钟…
+                        </Badge>
+                      ) : hwTimeInfo ? (
+                        <>
+                          <Badge
+                            tone={Math.abs(hwTimeInfo.drift_seconds) > 5 ? "warning" : "success"}
+                            size="sm"
+                          >
+                            {hwTimeInfo.camera_time || "时钟已读取"} · {formatTimeDriftLabel(hwTimeInfo.drift_seconds)}
+                          </Badge>
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            size="sm"
+                            loading={syncingModalTime}
+                            onClick={() => void handleSyncModalCameraTime()}
+                          >
+                            <Clock size={12} />
+                            <span>同步本机时间</span>
+                          </Button>
+                        </>
+                      ) : null}
+                    </div>
+                  </div>
+                  {syncHardwareOSD && (
+                    <>
+                      <div className="hw-network-box__grid hw-network-box__grid--3col">
+                        <Input
+                          label="画面主文字 (通道名称)"
+                          value={osdLabelText}
+                          maxLength={32}
+                          onChange={(e) => {
+                            setOsdLabelTouched(true);
+                            setOsdLabelText(e.target.value);
+                          }}
+                          placeholder={editingCam.name || "例如：一楼大厅"}
+                        />
+                        <Input
+                          label="附加自定义文字 (第二行，可选)"
+                          value={osdLabel2Text}
+                          maxLength={32}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setOsdLabel2Text(val);
+                            setOsdLabel2Enabled(Boolean(val.trim()));
+                          }}
+                          placeholder="留空则隐藏第二行"
+                        />
+                        <MorphSelect
+                          label="文字显示位置"
+                          className="morph-select--field"
+                          items={[
+                            { value: "keep", label: "保持当前位置" },
+                            { value: "top_left", label: "左上角" },
+                            { value: "top_right", label: "右上角" },
+                            { value: "bottom_left", label: "左下角 (默认)" },
+                            { value: "bottom_right", label: "右下角" },
+                          ]}
+                          value={osdPosition}
+                          onValueChange={(val) => setOsdPosition(val as OSDPositionPreset)}
+                          searchable={false}
+                          panelWidth={220}
+                        />
+                      </div>
+                      <div className="hw-osd-switches">
+                        <Switch
+                          checked={osdLabelEnabled}
+                          onCheckedChange={setOsdLabelEnabled}
+                          label="显示主文字"
+                        />
+                        <Switch
+                          checked={osdDateEnabled}
+                          onCheckedChange={setOsdDateEnabled}
+                          label="显示日期时间"
+                        />
+                        <Switch
+                          checked={osdWeekEnabled}
+                          onCheckedChange={setOsdWeekEnabled}
+                          label="显示星期"
+                        />
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+
               {modalProbeMsg && (
                 <Alert
                   tone={modalProbeMsg.ok ? "success" : "warning"}
@@ -2157,7 +2543,9 @@ export function DeviceManagerView({
                           (hwNetmask.trim() !== hwNetInfo.netmask ||
                             hwGateway.trim() !== hwNetInfo.gateway)))
                         ? `修改硬件网络并保存`
-                        : `保存`}
+                        : isEditMode && syncHardwareOSD
+                          ? `写入画面水印并保存`
+                          : `保存`}
                     </span>
                   </Button>
                 </div>
@@ -2263,6 +2651,43 @@ export function DeviceManagerView({
               >
                 <Trash2 size={14} />
                 <span>确认清空全部 ({cameras.length} 台)</span>
+              </Button>
+            </div>
+          </DialogContent>
+        )}
+      </Dialog>
+
+      {/* Modal 5: Batch Sync OSD Names Confirmation Dialog */}
+      <Dialog
+        open={confirmSyncOSDModalOpen}
+        onOpenChange={(open) => {
+          if (!open && !syncingAllOSD) setConfirmSyncOSDModalOpen(false);
+        }}
+      >
+        {confirmSyncOSDModalOpen && (
+          <DialogContent
+            title="批量同步设备名称到摄像头画面水印 (OSD)"
+            description={`即将把当前设备列表中的「设备名称」批量写入全部 ${cameras.length} 台摄像头的硬件视频流 OSD 水印与时间显示。写入后实时监控与 1080P 录像都将包含最新画面名称。`}
+          >
+            <div className="manual-cam-actions">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                disabled={syncingAllOSD}
+                onClick={() => setConfirmSyncOSDModalOpen(false)}
+              >
+                取消
+              </Button>
+              <Button
+                type="button"
+                variant="primary"
+                size="sm"
+                loading={syncingAllOSD}
+                onClick={() => void handleBatchSyncAllOSDNames()}
+              >
+                <Type size={14} />
+                <span>确认批量同步 ({cameras.length} 台)</span>
               </Button>
             </div>
           </DialogContent>
