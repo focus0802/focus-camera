@@ -163,15 +163,16 @@ type RecordingConfig struct {
 }
 
 type AppConfig struct {
-	DefaultUsername  string          `json:"default_username"`
-	DefaultPassword  string          `json:"default_password"`
-	SubnetPrefix     string          `json:"subnet_prefix"`
-	UpdateURL        string          `json:"update_url"`
-	AutoStartEnabled bool            `json:"auto_start_enabled"`
-	AutoStartMode    string          `json:"auto_start_mode"`
-	AutoTimeSync     *bool           `json:"auto_time_sync,omitempty"`
-	Recording        RecordingConfig `json:"recording"`
-	Cameras          []Camera        `json:"cameras"`
+	DefaultUsername    string          `json:"default_username"`
+	DefaultPassword    string          `json:"default_password"`
+	SubnetPrefix       string          `json:"subnet_prefix"`
+	UpdateURL          string          `json:"update_url"`
+	AutoStartEnabled   bool            `json:"auto_start_enabled"`
+	AutoStartMode      string          `json:"auto_start_mode"`
+	AutoTimeSync       *bool           `json:"auto_time_sync,omitempty"`
+	PreferredDisplayID string          `json:"preferred_display_id,omitempty"`
+	Recording          RecordingConfig `json:"recording"`
+	Cameras            []Camera        `json:"cameras"`
 }
 
 func NormalizeAutoStartMode(mode string) string {
@@ -724,6 +725,23 @@ func (s *Store) SetAutoTimeSync(enabled bool) error {
 	defer s.mu.Unlock()
 	v := enabled
 	s.cfg.AutoTimeSync = &v
+	return s.save()
+}
+
+func (s *Store) GetPreferredDisplayID() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return strings.TrimSpace(s.cfg.PreferredDisplayID)
+}
+
+func (s *Store) SetPreferredDisplayID(displayID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := strings.TrimSpace(displayID)
+	if s.cfg.PreferredDisplayID == next {
+		return nil
+	}
+	s.cfg.PreferredDisplayID = next
 	return s.save()
 }
 

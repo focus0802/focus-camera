@@ -249,4 +249,26 @@ export interface AutoStartStatus {
   warning?: string;
 }
 
+export interface DisplayInfo {
+  id: string;
+  name: string;
+  index: number;
+  primary: boolean;
+  current: boolean;
+  width: number;
+  height: number;
+  work_x: number;
+  work_y: number;
+  work_w: number;
+  work_h: number;
+}
+
+export interface DisplaysPayload {
+  ok: boolean;
+  displays: DisplayInfo[];
+  preferred_display_id: string;
+  current_display_id: string;
+  fallback_used: boolean;
+}
+
 export type SystemSettingsTab = "general" | "recording" | "update";

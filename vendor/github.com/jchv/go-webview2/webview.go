@@ -7,10 +7,13 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"math"
 	"reflect"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"unsafe"
 
@@ -49,25 +52,178 @@ type browser interface {
 }
 
 type webview struct {
-	hwnd       uintptr
-	mainthread uintptr
-	browser    browser
-	autofocus  bool
-	maxsz      w32.Point
-	minsz      w32.Point
-	icon       uintptr
-	trayAdded  bool
-	m          sync.Mutex
-	bindings   map[string]interface{}
-	dispatchq  []func()
+	hwnd               uintptr
+	mainthread         uintptr
+	browser            browser
+	autofocus          bool
+	maxsz              w32.Point
+	minsz              w32.Point
+	icon               uintptr
+	trayAdded          bool
+	preferredDisplayID string
+	currentDisplayID   string
+	onDisplayChanged   func(displayID string)
+	m                  sync.Mutex
+	bindings           map[string]interface{}
+	dispatchq          []func()
 }
 
 type WindowOptions struct {
-	Title  string
-	Width  uint
-	Height uint
-	IconId uint
-	Center bool
+	Title            string
+	Width            uint
+	Height           uint
+	IconId           uint
+	Center           bool
+	DisplayID        string
+	OnDisplayChanged func(displayID string)
+}
+
+type rawMonitor struct {
+	hMon    uintptr
+	id      string
+	name    string
+	primary bool
+	current bool
+	rcMon   w32.Rect
+	rcWork  w32.Rect
+}
+
+var (
+	enumMonitorsMu   sync.Mutex
+	enumMonitorsList []rawMonitor
+	enumMonitorsCur  uintptr
+	enumMonitorsCb   = windows.NewCallback(func(hMonitor, hdcMonitor, lprcMonitor, dwData uintptr) uintptr {
+		var mi w32.MonitorInfoExW
+		mi.CbSize = uint32(unsafe.Sizeof(mi))
+		ok, _, _ := w32.User32GetMonitorInfoW.Call(hMonitor, uintptr(unsafe.Pointer(&mi)))
+		if ok == 0 {
+			return 1
+		}
+		devName := strings.TrimSpace(windows.UTF16ToString(mi.SzDevice[:]))
+		cleanID := strings.TrimPrefix(strings.ToUpper(devName), `\\.\`)
+		if cleanID == "" {
+			cleanID = fmt.Sprintf("DISPLAY%d", len(enumMonitorsList)+1)
+		}
+		friendly := ""
+		var dd w32.DisplayDeviceW
+		dd.Cb = uint32(unsafe.Sizeof(dd))
+		if r, _, _ := w32.User32EnumDisplayDevicesW.Call(uintptr(unsafe.Pointer(&mi.SzDevice[0])), 0, uintptr(unsafe.Pointer(&dd)), 0); r != 0 {
+			friendly = strings.TrimSpace(windows.UTF16ToString(dd.DeviceString[:]))
+		}
+		enumMonitorsList = append(enumMonitorsList, rawMonitor{
+			hMon:    hMonitor,
+			id:      cleanID,
+			name:    friendly,
+			primary: (mi.DwFlags & w32.MonitorInfoFPrimary) != 0,
+			current: enumMonitorsCur != 0 && hMonitor == enumMonitorsCur,
+			rcMon:   mi.RcMonitor,
+			rcWork:  mi.RcWork,
+		})
+		return 1
+	})
+)
+
+func normalizeDisplayID(id string) string {
+	s := strings.TrimSpace(id)
+	s = strings.TrimPrefix(strings.ToUpper(s), `\\.\`)
+	return s
+}
+
+func enumRawMonitors(hwnd uintptr) []rawMonitor {
+	enumMonitorsMu.Lock()
+	defer enumMonitorsMu.Unlock()
+
+	enumMonitorsList = enumMonitorsList[:0]
+	enumMonitorsCur = 0
+	if hwnd != 0 {
+		enumMonitorsCur, _, _ = w32.User32MonitorFromWindow.Call(hwnd, w32.MonitorDefaultToNearest)
+	}
+	_, _, _ = w32.User32EnumDisplayMonitors.Call(0, 0, enumMonitorsCb, 0)
+	out := append([]rawMonitor(nil), enumMonitorsList...)
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].primary != out[j].primary {
+			return out[i].primary
+		}
+		if out[i].rcMon.Left != out[j].rcMon.Left {
+			return out[i].rcMon.Left < out[j].rcMon.Left
+		}
+		return out[i].rcMon.Top < out[j].rcMon.Top
+	})
+	hasCurrent := false
+	for i := range out {
+		if out[i].current {
+			hasCurrent = true
+			break
+		}
+	}
+	if !hasCurrent && len(out) > 0 {
+		out[0].current = true
+	}
+	for i := range out {
+		n := strings.TrimSpace(out[i].name)
+		if n == "" || strings.EqualFold(n, "Generic PnP Monitor") || n == "通用即插即用监视器" {
+			if out[i].primary {
+				out[i].name = "主显示器"
+			} else {
+				out[i].name = fmt.Sprintf("外接显示器 %d", i+1)
+			}
+		}
+	}
+	return out
+}
+
+func EnumDisplaysForWindow(hwnd uintptr) []MonitorDescriptor {
+	raw := enumRawMonitors(hwnd)
+	res := make([]MonitorDescriptor, 0, len(raw))
+	for i, m := range raw {
+		res = append(res, MonitorDescriptor{
+			ID:      m.id,
+			Name:    m.name,
+			Index:   i + 1,
+			Primary: m.primary,
+			Current: m.current,
+			Width:   int(m.rcMon.Right - m.rcMon.Left),
+			Height:  int(m.rcMon.Bottom - m.rcMon.Top),
+			WorkX:   int(m.rcWork.Left),
+			WorkY:   int(m.rcWork.Top),
+			WorkW:   int(m.rcWork.Right - m.rcWork.Left),
+			WorkH:   int(m.rcWork.Bottom - m.rcWork.Top),
+		})
+	}
+	return res
+}
+
+func findTargetMonitor(mons []rawMonitor, targetID string) (rawMonitor, bool) {
+	if len(mons) == 0 {
+		return rawMonitor{}, false
+	}
+	norm := normalizeDisplayID(targetID)
+	if norm != "" {
+		for _, m := range mons {
+			if normalizeDisplayID(m.id) == norm {
+				return m, true
+			}
+		}
+	}
+	for _, m := range mons {
+		if m.primary {
+			return m, false
+		}
+	}
+	return mons[0], false
+}
+
+func windowBoundsForWorkRect(workRect w32.Rect) (posX, posY, winW, winH int32) {
+	frameX, _, _ := w32.User32GetSystemMetrics.Call(w32.SM_CXSIZEFRAME)
+	frameY, _, _ := w32.User32GetSystemMetrics.Call(w32.SM_CYSIZEFRAME)
+	pad, _, _ := w32.User32GetSystemMetrics.Call(w32.SM_CXPADDEDBORDER)
+	borderX := int32(frameX + pad)
+	borderY := int32(frameY + pad)
+	posX = workRect.Left - borderX
+	posY = workRect.Top
+	winW = (workRect.Right - workRect.Left) + borderX*2
+	winH = (workRect.Bottom - workRect.Top) + borderY
+	return posX, posY, winW, winH
 }
 
 type WebViewOptions struct {
@@ -295,6 +451,23 @@ func wndproc(hwnd, msg, wp, lp uintptr) uintptr {
 		case w32.WMDestroy:
 			w.RemoveTrayIcon()
 			w.Terminate()
+		case w32.WMExitSizeMove:
+			mons := enumRawMonitors(w.hwnd)
+			for _, m := range mons {
+				if m.current && m.id != "" && m.id != w.currentDisplayID {
+					w.applyMonitorBounds(m, true)
+					break
+				}
+			}
+			r, _, _ := w32.User32DefWindowProcW.Call(hwnd, msg, wp, lp)
+			return r
+		case w32.WMDisplayChange:
+			mons := enumRawMonitors(w.hwnd)
+			if target, _ := findTargetMonitor(mons, w.preferredDisplayID); target.id != "" {
+				w.applyMonitorBounds(target, false)
+			}
+			r, _, _ := w32.User32DefWindowProcW.Call(hwnd, msg, wp, lp)
+			return r
 		case w32.WMGetMinMaxInfo:
 			lpmmi := (*w32.MinMaxInfo)(unsafe.Pointer(lp))
 			if w.maxsz.X > 0 && w.maxsz.Y > 0 {
@@ -363,35 +536,37 @@ func (w *webview) CreateWithOptions(opts WindowOptions) bool {
 		windowHeight = 480
 	}
 
-	var workRect w32.Rect
-	spiOk, _, _ := w32.User32SystemParametersInfoW.Call(
-		0x0030, // SPI_GETWORKAREA
-		0,
-		uintptr(unsafe.Pointer(&workRect)),
-		0,
-	)
-	frameX, _, _ := w32.User32GetSystemMetrics.Call(w32.SM_CXSIZEFRAME)
-	frameY, _, _ := w32.User32GetSystemMetrics.Call(w32.SM_CYSIZEFRAME)
-	pad, _, _ := w32.User32GetSystemMetrics.Call(w32.SM_CXPADDEDBORDER)
-	borderX := int32(frameX + pad)
-	borderY := int32(frameY + pad)
+	w.preferredDisplayID = normalizeDisplayID(opts.DisplayID)
+	w.onDisplayChanged = opts.OnDisplayChanged
+
+	mons := enumRawMonitors(0)
+	targetMon, _ := findTargetMonitor(mons, w.preferredDisplayID)
 
 	var posX, posY, winW, winH int32
-	if spiOk != 0 && workRect.Right > workRect.Left && workRect.Bottom > workRect.Top {
-		posX = workRect.Left - borderX
-		posY = workRect.Top
-		winW = (workRect.Right - workRect.Left) + borderX*2
-		winH = (workRect.Bottom - workRect.Top) + borderY
+	if targetMon.id != "" && targetMon.rcWork.Right > targetMon.rcWork.Left && targetMon.rcWork.Bottom > targetMon.rcWork.Top {
+		w.currentDisplayID = targetMon.id
+		posX, posY, winW, winH = windowBoundsForWorkRect(targetMon.rcWork)
 	} else {
-		screenWidth, _, _ := w32.User32GetSystemMetrics.Call(w32.SM_CXSCREEN)
-		screenHeight, _, _ := w32.User32GetSystemMetrics.Call(w32.SM_CYSCREEN)
-		winW = int32(windowWidth)
-		winH = int32(windowHeight)
-		if int32(screenWidth) > winW {
-			posX = (int32(screenWidth) - winW) / 2
-		}
-		if int32(screenHeight) > winH {
-			posY = (int32(screenHeight) - winH) / 2
+		var workRect w32.Rect
+		spiOk, _, _ := w32.User32SystemParametersInfoW.Call(
+			0x0030, // SPI_GETWORKAREA
+			0,
+			uintptr(unsafe.Pointer(&workRect)),
+			0,
+		)
+		if spiOk != 0 && workRect.Right > workRect.Left && workRect.Bottom > workRect.Top {
+			posX, posY, winW, winH = windowBoundsForWorkRect(workRect)
+		} else {
+			screenWidth, _, _ := w32.User32GetSystemMetrics.Call(w32.SM_CXSCREEN)
+			screenHeight, _, _ := w32.User32GetSystemMetrics.Call(w32.SM_CYSCREEN)
+			winW = int32(windowWidth)
+			winH = int32(windowHeight)
+			if int32(screenWidth) > winW {
+				posX = (int32(screenWidth) - winW) / 2
+			}
+			if int32(screenHeight) > winH {
+				posY = (int32(screenHeight) - winH) / 2
+			}
 		}
 	}
 	w.minsz = w32.Point{X: winW, Y: winH}
@@ -617,12 +792,80 @@ func (w *webview) RestoreFromTray() {
 	if w.hwnd == 0 {
 		return
 	}
+	mons := enumRawMonitors(w.hwnd)
+	stillValid := false
+	for _, m := range mons {
+		if m.id == w.currentDisplayID {
+			stillValid = true
+			break
+		}
+	}
+	if !stillValid {
+		if target, _ := findTargetMonitor(mons, w.preferredDisplayID); target.id != "" {
+			w.applyMonitorBounds(target, false)
+		}
+	}
 	_, _, _ = w32.User32ShowWindow.Call(w.hwnd, w32.SWShow)
 	_, _, _ = w32.User32ShowWindow.Call(w.hwnd, w32.SWRestore)
 	_, _, _ = w32.User32SetForegroundWindow.Call(w.hwnd)
 	_, _, _ = w32.User32SetFocus.Call(w.hwnd)
 	w.browser.Resize()
 	w.browser.Focus()
+}
+
+func (w *webview) applyMonitorBounds(m rawMonitor, userDragged bool) {
+	if w.hwnd == 0 || m.rcWork.Right <= m.rcWork.Left || m.rcWork.Bottom <= m.rcWork.Top {
+		return
+	}
+	posX, posY, winW, winH := windowBoundsForWorkRect(m.rcWork)
+	w.minsz = w32.Point{X: winW, Y: winH}
+	w.maxsz = w32.Point{X: winW, Y: winH}
+	w.currentDisplayID = m.id
+	if userDragged {
+		w.preferredDisplayID = m.id
+	}
+	_, _, _ = w32.User32SetWindowPos.Call(
+		w.hwnd, 0, uintptr(posX), uintptr(posY), uintptr(winW), uintptr(winH),
+		w32.SWPNoZOrder|w32.SWPNoActivate|w32.SWPFrameChanged,
+	)
+	_ = w.browser.NotifyParentWindowPositionChanged()
+	w.browser.Resize()
+	if userDragged && w.onDisplayChanged != nil {
+		idCopy := m.id
+		go w.onDisplayChanged(idCopy)
+	}
+	w.browser.Eval("window.dispatchEvent(new CustomEvent('focus-display-changed'));")
+}
+
+func (w *webview) MoveToDisplay(displayID string) (string, bool) {
+	if w.hwnd == 0 {
+		return "", false
+	}
+	type moveRes struct {
+		id    string
+		found bool
+	}
+	runMove := func() moveRes {
+		mons := enumRawMonitors(w.hwnd)
+		target, found := findTargetMonitor(mons, displayID)
+		if target.id == "" {
+			return moveRes{}
+		}
+		w.preferredDisplayID = target.id
+		w.applyMonitorBounds(target, false)
+		return moveRes{id: target.id, found: found}
+	}
+	curThread, _, _ := w32.Kernel32GetCurrentThreadID.Call()
+	if curThread == w.mainthread {
+		r := runMove()
+		return r.id, r.found
+	}
+	ch := make(chan moveRes, 1)
+	w.Dispatch(func() {
+		ch <- runMove()
+	})
+	r := <-ch
+	return r.id, r.found
 }
 
 func (w *webview) RemoveTrayIcon() {

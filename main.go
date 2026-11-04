@@ -189,6 +189,63 @@ func detectLocalSubnet() string {
 	return "192.168.1"
 }
 
+type DisplayInfo struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Index   int    `json:"index"`
+	Primary bool   `json:"primary"`
+	Current bool   `json:"current"`
+	Width   int    `json:"width"`
+	Height  int    `json:"height"`
+	WorkX   int    `json:"work_x"`
+	WorkY   int    `json:"work_y"`
+	WorkW   int    `json:"work_w"`
+	WorkH   int    `json:"work_h"`
+}
+
+var globalConfigStore *config.Store
+
+func handleNativeDisplayMoved(displayID string) {
+	displayID = strings.TrimSpace(displayID)
+	if displayID == "" || globalConfigStore == nil {
+		return
+	}
+	prev := globalConfigStore.GetPreferredDisplayID()
+	if prev != displayID {
+		if err := globalConfigStore.SetPreferredDisplayID(displayID); err == nil {
+			log.Printf("[Display] 已记忆监控大屏所在显示器: %s", displayID)
+		}
+	}
+}
+
+func buildDisplayStatusPayload(store *config.Store) map[string]any {
+	displays := listNativeDisplays()
+	preferredID := ""
+	if store != nil {
+		preferredID = store.GetPreferredDisplayID()
+	}
+	currentID := ""
+	foundPreferred := false
+	for _, d := range displays {
+		if d.Current {
+			currentID = d.ID
+		}
+		if preferredID != "" && strings.EqualFold(d.ID, preferredID) {
+			foundPreferred = true
+		}
+	}
+	if currentID == "" && len(displays) > 0 {
+		currentID = displays[0].ID
+	}
+	return map[string]any{
+		"ok":                   true,
+		"displays":             displays,
+		"preferred_display_id": preferredID,
+		"current_display_id":   currentID,
+		"fallback_used":        preferredID != "" && !foundPreferred,
+	}
+}
+
 func init() {
 	// Required by macOS Cocoa/AppKit NSApplication event loop
 	runtime.LockOSThread()
@@ -312,6 +369,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("初始化配置失败: %v", err)
 	}
+	globalConfigStore = store
 	if autoEnabled, autoMode := store.GetAutoStart(); autoEnabled {
 		if healed, err := autostart.SyncOnStartup(autoEnabled, autoMode); err != nil {
 			log.Printf("[AutoStart] 启动时同步开机自启路径失败: %v", err)
@@ -792,6 +850,74 @@ func main() {
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
+	})
+
+	// 1f. API: Multi-Display Detection, Selection & Memory
+	mux.HandleFunc("/api/displays", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(w).Encode(buildDisplayStatusPayload(store))
+	})
+
+	mux.HandleFunc("/api/displays/select", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost && r.Method != http.MethodPut {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		var req struct {
+			DisplayID string `json:"display_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		targetID := strings.TrimSpace(req.DisplayID)
+		appliedID, err := moveNativeWindowToDisplay(targetID)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok":    false,
+				"error": err.Error(),
+			})
+			return
+		}
+		saveID := appliedID
+		if saveID == "" {
+			saveID = targetID
+		}
+		if saveID != "" {
+			if err := store.SetPreferredDisplayID(saveID); err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"ok":    false,
+					"error": err.Error(),
+				})
+				return
+			}
+			log.Printf("[Display] 已切换并记忆监控大屏目标显示器: %s", saveID)
+		}
+		_ = json.NewEncoder(w).Encode(buildDisplayStatusPayload(store))
+	})
+
+	mux.HandleFunc("/api/displays/remember", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost && r.Method != http.MethodPut {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		var req struct {
+			DisplayID string `json:"display_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		handleNativeDisplayMoved(req.DisplayID)
+		_ = json.NewEncoder(w).Encode(buildDisplayStatusPayload(store))
 	})
 
 	// 2. API: Scan LAN and return discovered cameras for interactive preview/selection
@@ -2244,7 +2370,8 @@ func main() {
 		log.Printf("[AutoStart] 开机自启模式为静默托盘运行，主窗口将收起至系统托盘。")
 	}
 
-	runNativeDesktopWindow(fmt.Sprintf("%s/?_v=%d", actualURL, time.Now().UnixMilli()), startInTray)
+	preferredDisplayID := store.GetPreferredDisplayID()
+	runNativeDesktopWindow(fmt.Sprintf("%s/?_v=%d", actualURL, time.Now().UnixMilli()), startInTray, preferredDisplayID)
 	log.Printf("桌面窗口已关闭，正在安全刷盘并关闭所有 1080P 录像分片...")
 	recMgr.StopAll()
 	log.Printf("所有录像分片已安全落盘，程序退出。")

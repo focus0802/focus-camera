@@ -7,6 +7,7 @@ import {
   Maximize2,
   Mic,
   Minimize2,
+  Monitor,
   PhoneCall,
   PhoneOff,
   Power,
@@ -26,6 +27,7 @@ import {
 import {
   cameraSupportsTalk,
   type Camera,
+  type DisplaysPayload,
   type PTZPreset,
   type RecordingConfig,
   type RecordingState,
@@ -294,6 +296,84 @@ export function App() {
   const [updateUrlInput, setUpdateUrlInput] = useState<string>("");
   const [checkingUpdate, setCheckingUpdate] = useState<boolean>(false);
   const [applyingUpdate, setApplyingUpdate] = useState<boolean>(false);
+  const [displaysPayload, setDisplaysPayload] =
+    useState<DisplaysPayload | null>(null);
+  const [switchingDisplay, setSwitchingDisplay] = useState<boolean>(false);
+
+  const fetchDisplays = useCallback(async () => {
+    try {
+      const res = await fetch("/api/displays");
+      if (res.ok) {
+        const data: DisplaysPayload = await res.json();
+        if (data.ok) {
+          setDisplaysPayload(data);
+        }
+      }
+    } catch {
+      // ignore transient errors
+    }
+  }, []);
+
+  const handleSelectDisplay = useCallback(
+    async (displayId: string) => {
+      if (!displayId) return;
+      setSwitchingDisplay(true);
+      try {
+        const res = await fetch("/api/displays/select", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ display_id: displayId }),
+        });
+        if (res.ok) {
+          const data: DisplaysPayload = await res.json();
+          if (data.ok) {
+            setDisplaysPayload(data);
+          }
+        }
+      } catch {
+        // ignore transient errors
+      } finally {
+        setSwitchingDisplay(false);
+      }
+    },
+    []
+  );
+
+  useEffect(() => {
+    void fetchDisplays();
+    const onDisplayChanged = () => {
+      void fetchDisplays();
+    };
+    window.addEventListener("focus-display-changed", onDisplayChanged);
+    return () => {
+      window.removeEventListener("focus-display-changed", onDisplayChanged);
+    };
+  }, [fetchDisplays]);
+
+  const displays = useMemo(
+    () => displaysPayload?.displays ?? [],
+    [displaysPayload?.displays]
+  );
+
+  const currentDisplay = useMemo(
+    () =>
+      displays.find((d) => d.id === displaysPayload?.current_display_id) ||
+      displays.find((d) => d.current) ||
+      displays[0] ||
+      null,
+    [displays, displaysPayload?.current_display_id]
+  );
+
+  const handleCycleNextDisplay = useCallback(() => {
+    if (displays.length <= 1) return;
+    const curIdx = currentDisplay
+      ? displays.findIndex((d) => d.id === currentDisplay.id)
+      : 0;
+    const nextDisplay = displays[(Math.max(0, curIdx) + 1) % displays.length];
+    if (nextDisplay) {
+      void handleSelectDisplay(nextDisplay.id);
+    }
+  }, [displays, currentDisplay, handleSelectDisplay]);
 
   const openSystemSettings = useCallback(
     (tab: SystemSettingsTab = "general") => {
@@ -1256,11 +1336,25 @@ export function App() {
               <span>发现新版本 {updateStatus.latest_version}</span>
             </Button>
           )}
+          {displays.length > 1 && currentDisplay && (
+            <Button
+              variant="secondary"
+              size="sm"
+              loading={switchingDisplay}
+              onClick={handleCycleNextDisplay}
+              title={`当前在「屏幕 ${currentDisplay.index} · ${currentDisplay.name} (${currentDisplay.width}×${currentDisplay.height})」，点击一键将大屏窗口切换到下一块显示器并自动记忆`}
+            >
+              <Monitor size={14} />
+              <span>
+                屏幕 {currentDisplay.index}/{displays.length}
+              </span>
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="sm"
             onClick={() => openSystemSettings("general")}
-            title={`系统设置（开机自启 · 录像与存储策略 · 版本 ${updateStatus?.current_version || "v2.4.2"}）`}
+            title={`系统设置（常规设置 · 多显示器记忆 · 录像与存储策略 · 版本 ${updateStatus?.current_version || "v2.6.0"}）`}
           >
             <Settings size={14} />
             <span>系统设置</span>
@@ -1422,6 +1516,27 @@ export function App() {
               }))}
             />
           </div>
+
+          {displays.length > 1 && currentDisplay && (
+            <div className="wall-control-drawer__field">
+              <span className="wall-control-drawer__label">
+                投送显示器（已记忆）
+              </span>
+              <SegmentedControl
+                label="投送显示器选择"
+                value={currentDisplay.id}
+                onValueChange={(nextId) => {
+                  if (nextId && nextId !== currentDisplay.id) {
+                    void handleSelectDisplay(nextId);
+                  }
+                }}
+                options={displays.map((d) => ({
+                  value: d.id,
+                  label: `屏幕 ${d.index} · ${d.name} (${d.width}×${d.height})`,
+                }))}
+              />
+            </div>
+          )}
 
           <div className="wall-control-drawer__footer">
             <Switch
@@ -1923,6 +2038,35 @@ export function App() {
                 </div>
               </div>
 
+              {displays.length > 1 && currentDisplay && (
+                <div className="command-palette__quick-bar">
+                  <span className="command-palette__section-label">
+                    投送显示器（自动记忆）
+                  </span>
+                  <div className="command-palette__pills">
+                    {displays.map((d) => (
+                      <Button
+                        key={d.id}
+                        variant={
+                          currentDisplay.id === d.id ? "primary" : "secondary"
+                        }
+                        size="sm"
+                        loading={switchingDisplay && currentDisplay.id !== d.id}
+                        onClick={() => {
+                          void handleSelectDisplay(d.id);
+                          setCommandModalOpen(false);
+                        }}
+                      >
+                        <Monitor size={13} />
+                        <span>
+                          屏幕 {d.index} · {d.name} ({d.width}×{d.height})
+                        </span>
+                      </Button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {groups.length > 1 && (
                 <div className="command-palette__quick-bar">
                   <span className="command-palette__section-label">分组快速切换</span>
@@ -2065,6 +2209,10 @@ export function App() {
         onOpenChange={setSettingsModalOpen}
         activeTab={settingsTab}
         onTabChange={setSettingsTab}
+        displaysPayload={displaysPayload}
+        switchingDisplay={switchingDisplay}
+        onSelectDisplay={handleSelectDisplay}
+        onRefreshDisplays={fetchDisplays}
         recordingConfig={recordingsPayload?.config ?? DEFAULT_REC_CONFIG}
         activeRecordingCount={activeRecordingCount}
         onSaveRecordingSettings={async (cfg) => {

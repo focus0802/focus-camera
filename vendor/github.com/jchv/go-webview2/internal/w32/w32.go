@@ -59,6 +59,10 @@ var (
 	User32DestroyMenu              = user32.NewProc("DestroyMenu")
 	User32CreateIconFromResourceEx = user32.NewProc("CreateIconFromResourceEx")
 	User32SystemParametersInfoW    = user32.NewProc("SystemParametersInfoW")
+	User32EnumDisplayMonitors      = user32.NewProc("EnumDisplayMonitors")
+	User32GetMonitorInfoW          = user32.NewProc("GetMonitorInfoW")
+	User32MonitorFromWindow        = user32.NewProc("MonitorFromWindow")
+	User32EnumDisplayDevicesW      = user32.NewProc("EnumDisplayDevicesW")
 )
 
 const (
@@ -113,6 +117,7 @@ const (
 	WMClose         = 0x0010
 	WMQuit          = 0x0012
 	WMGetMinMaxInfo = 0x0024
+	WMDisplayChange = 0x007E
 	WMSetIcon       = 0x0080
 	WMNCCalcSize    = 0x0083
 	WMNCLButtonDown = 0x00A1
@@ -120,6 +125,7 @@ const (
 	WMLButtonDblClk = 0x0203
 	WMRButtonUp     = 0x0205
 	WMMoving        = 0x0216
+	WMExitSizeMove  = 0x0232
 	WMApp           = 0x8000
 	WMTrayIcon      = 0x8001
 	NINBalloonClick = 0x0405
@@ -202,6 +208,30 @@ type Rect struct {
 	Top    int32
 	Right  int32
 	Bottom int32
+}
+
+const (
+	MonitorDefaultToNull    = 0
+	MonitorDefaultToPrimary = 1
+	MonitorDefaultToNearest = 2
+	MonitorInfoFPrimary     = 1
+)
+
+type MonitorInfoExW struct {
+	CbSize    uint32
+	RcMonitor Rect
+	RcWork    Rect
+	DwFlags   uint32
+	SzDevice  [32]uint16
+}
+
+type DisplayDeviceW struct {
+	Cb           uint32
+	DeviceName   [32]uint16
+	DeviceString [128]uint16
+	StateFlags   uint32
+	DeviceID     [128]uint16
+	DeviceKey    [128]uint16
 }
 
 type MinMaxInfo struct {

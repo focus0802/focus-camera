@@ -367,7 +367,55 @@ func applyWindowsImmersiveTheme(hwnd uintptr, dark bool) {
 	_, _, _ = procDwmSetWindowAttr.Call(hwnd, 36, uintptr(unsafe.Pointer(&textColor)), unsafe.Sizeof(textColor))
 }
 
-func runNativeDesktopWindow(appURL string, startInTray bool) {
+func listNativeDisplays() []DisplayInfo {
+	winWindowMu.Lock()
+	hwnd := activeMainHWND
+	winWindowMu.Unlock()
+
+	mons := webview2.EnumDisplaysForWindow(hwnd)
+	res := make([]DisplayInfo, 0, len(mons))
+	for _, m := range mons {
+		res = append(res, DisplayInfo{
+			ID:      m.ID,
+			Name:    m.Name,
+			Index:   m.Index,
+			Primary: m.Primary,
+			Current: m.Current,
+			Width:   m.Width,
+			Height:  m.Height,
+			WorkX:   m.WorkX,
+			WorkY:   m.WorkY,
+			WorkW:   m.WorkW,
+			WorkH:   m.WorkH,
+		})
+	}
+	return res
+}
+
+func moveNativeWindowToDisplay(displayID string) (string, error) {
+	winWindowMu.Lock()
+	w := activeWebView
+	hwnd := activeMainHWND
+	winWindowMu.Unlock()
+
+	if w != nil && hwnd != 0 {
+		appliedID, _ := w.MoveToDisplay(displayID)
+		return appliedID, nil
+	}
+	mons := webview2.EnumDisplaysForWindow(0)
+	norm := strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(displayID)), `\\.\`)
+	for _, m := range mons {
+		if strings.EqualFold(m.ID, norm) {
+			return m.ID, nil
+		}
+	}
+	if len(mons) > 0 {
+		return mons[0].ID, nil
+	}
+	return strings.TrimSpace(displayID), nil
+}
+
+func runNativeDesktopWindow(appURL string, startInTray bool, preferredDisplayID string) {
 	localAppData := os.Getenv("LOCALAPPDATA")
 	if localAppData == "" {
 		localAppData = os.TempDir()
@@ -383,18 +431,20 @@ func runNativeDesktopWindow(appURL string, startInTray bool) {
 	)
 
 	if ver, err := webviewloader.GetInstalledVersion(); err == nil && ver != "" {
-		log.Printf("检测到系统 WebView2 运行时 (%s)，正在启动原生 Win32 桌面窗口 (startInTray=%v)...", ver, startInTray)
+		log.Printf("检测到系统 WebView2 运行时 (%s)，正在启动原生 Win32 桌面窗口 (startInTray=%v, preferredDisplay=%s)...", ver, startInTray, preferredDisplayID)
 		initW, initH, _, _ := resolveInitialWindowBounds(1640, 960)
 		w := webview2.NewWithOptions(webview2.WebViewOptions{
 			Debug:     os.Getenv("FOCUS_DEBUG") == "1",
 			AutoFocus: !startInTray,
 			DataPath:  dataPath,
 			WindowOptions: webview2.WindowOptions{
-				Title:  "Focus Camera · 高清监控与 NVR 中心",
-				Width:  uint(initW),
-				Height: uint(initH),
-				IconId: 1,
-				Center: true,
+				Title:            "Focus Camera · 高清监控与 NVR 中心",
+				Width:            uint(initW),
+				Height:           uint(initH),
+				IconId:           1,
+				Center:           true,
+				DisplayID:        preferredDisplayID,
+				OnDisplayChanged: handleNativeDisplayMoved,
 			},
 		})
 		if w != nil {

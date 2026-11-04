@@ -680,6 +680,41 @@ func TestCameraOSDAndTimeSyncConfig(t *testing.T) {
 	}
 }
 
+func TestMultiDisplayPreferenceAndFallback(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "cameras.json")
+	store, err := config.NewStore(cfgPath)
+	if err != nil {
+		t.Fatalf("NewStore err: %v", err)
+	}
+
+	if got := store.GetPreferredDisplayID(); got != "" {
+		t.Fatalf("Expected empty initial PreferredDisplayID, got %q", got)
+	}
+
+	if err := store.SetPreferredDisplayID("69734402"); err != nil {
+		t.Fatalf("SetPreferredDisplayID err: %v", err)
+	}
+	if got := store.GetPreferredDisplayID(); got != "69734402" {
+		t.Fatalf("Expected PreferredDisplayID='69734402', got %q", got)
+	}
+
+	// Reload from disk to verify persistence in cameras.json
+	reloaded, err := config.NewStore(cfgPath)
+	if err != nil {
+		t.Fatalf("Reload NewStore err: %v", err)
+	}
+	if got := reloaded.GetPreferredDisplayID(); got != "69734402" {
+		t.Fatalf("Expected persisted PreferredDisplayID='69734402', got %q", got)
+	}
+
+	payload := buildDisplayStatusPayload(reloaded)
+	if payload["preferred_display_id"] != "69734402" {
+		t.Fatalf("Expected payload preferred_display_id='69734402', got %v", payload["preferred_display_id"])
+	}
+}
+
+
 
 
 

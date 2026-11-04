@@ -42,11 +42,13 @@ Compute SHA-256 hashes and exact byte sizes for `dist/FocusCamera-Mac` and `dist
 Update `dist/version.json` with the new `version`, `published_at`, `notes`, and `assets` (`darwin_arm64` and `windows_amd64`).
 
 ## 5. Publish to GitHub Releases & Watch CI Pipeline (`gh run watch`)
-1. Commit source changes (ensuring `dist/`, `cameras.json`, and `recordings/` remain ignored) and push `main` first.
-2. Create and push the version tag (`git tag -f v2.3.0 && git push origin main -f v2.3.0`) so `.github/workflows/release.yml` triggers.
-3. **Mandatory CI Watch via `gh run watch`**: Immediately after pushing the tag, run `/opt/homebrew/bin/gh run watch --exit-status` to watch the GitHub Actions workflow in real time until completion:
+1. Commit source changes (ensuring `dist/`, `cameras.json`, and `recordings/` remain ignored, and **do not edit `.github/workflows/release.yml`** as the local OAuth token lacks `workflow` scope) and push `main` + the version tag:
    ```bash
-   /opt/homebrew/bin/gh run list --workflow=release.yml --limit 1
-   /opt/homebrew/bin/gh run watch <run-id> --exit-status
+   git push origin main -f v2.5.0
    ```
-   If the workflow fails, inspect logs directly with `/opt/homebrew/bin/gh run view <run-id> --log-failed`, fix the root cause, re-tag, and watch again until green. Finally, verify the published release via `/opt/homebrew/bin/gh release view <tag>` or the `github` MCP (`get_release_by_tag`).
+2. **Mandatory CI Watch via `gh run watch`**: Immediately after pushing the tag, query the full numeric `databaseId` (plain `gh run list` truncates 11-digit IDs, and omitting `<run-id>` triggers an interactive prompt) and watch the GitHub Actions workflow until completion:
+   ```bash
+   /opt/homebrew/bin/gh run list --workflow=release.yml --limit 1 --json databaseId,status,headBranch
+   /opt/homebrew/bin/gh run watch <databaseId> --exit-status
+   ```
+   If the workflow fails, inspect logs directly with `/opt/homebrew/bin/gh run view <databaseId> --log-failed`, fix the root cause, re-tag, and watch again until green. Finally, verify the published release via the `github` MCP (`get_release_by_tag`).

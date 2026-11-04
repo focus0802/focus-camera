@@ -22,6 +22,20 @@ const (
 	HintMax
 )
 
+type MonitorDescriptor struct {
+	ID      string
+	Name    string
+	Index   int
+	Primary bool
+	Current bool
+	Width   int
+	Height  int
+	WorkX   int
+	WorkY   int
+	WorkW   int
+	WorkH   int
+}
+
 // WebView is the interface for the webview.
 type WebView interface {
 
@@ -85,4 +99,5 @@ type WebView interface {
 	MinimizeToTray()
 	RestoreFromTray()
 	RemoveTrayIcon()
+	MoveToDisplay(displayID string) (string, bool)
 }

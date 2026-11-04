@@ -1,18 +1,22 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Clock,
   Download,
   ExternalLink,
   FolderOpen,
+  Monitor,
   Power,
   RefreshCw,
   Save,
   ShieldCheck,
+  SlidersHorizontal,
   Sparkles,
 } from "lucide-react";
 import type {
   AutoStartMode,
   AutoStartStatus,
+  DisplayInfo,
+  DisplaysPayload,
   RecordingConfig,
   SystemSettingsTab,
   UpdateStatus,
@@ -21,6 +25,7 @@ import { Dialog, DialogContent } from "./arc/dialog/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./arc/tabs/tabs";
 import { Switch } from "./arc/switch/switch";
 import SegmentedControl from "./arc/segmented-control/segmented-control";
+import { MorphSelect, type MorphSelectOption } from "./arc/morph-select/morph-select";
 import { Input } from "./arc/input/input";
 import { NumberField } from "./arc/number-field/number-field";
 import { TimePicker } from "./arc/time-picker/time-picker";
@@ -44,6 +49,10 @@ interface SystemSettingsModalProps {
   onOpenChange: (open: boolean) => void;
   activeTab: SystemSettingsTab;
   onTabChange: (tab: SystemSettingsTab) => void;
+  displaysPayload: DisplaysPayload | null;
+  switchingDisplay: boolean;
+  onSelectDisplay: (displayId: string) => Promise<void>;
+  onRefreshDisplays: () => Promise<void>;
   recordingConfig: RecordingConfig;
   activeRecordingCount: number;
   onSaveRecordingSettings: (cfg: RecordingConfig) => Promise<void>;
@@ -61,6 +70,10 @@ export function SystemSettingsModal({
   onOpenChange,
   activeTab,
   onTabChange,
+  displaysPayload,
+  switchingDisplay,
+  onSelectDisplay,
+  onRefreshDisplays,
   recordingConfig,
   activeRecordingCount,
   onSaveRecordingSettings,
@@ -137,7 +150,48 @@ export function SystemSettingsModal({
       return;
     }
     void fetchAutoStartStatus();
-  }, [open, fetchAutoStartStatus]);
+    void onRefreshDisplays();
+  }, [open, fetchAutoStartStatus, onRefreshDisplays]);
+
+  const displays = useMemo(
+    () => displaysPayload?.displays ?? [],
+    [displaysPayload?.displays]
+  );
+
+  const formatCleanDisplayName = useCallback((d: DisplayInfo): string => {
+    const cleaned = (d.name || "")
+      .replace(/\s*\((?:\\\\\.\\)?DISPLAY\d+\)\s*$/i, "")
+      .trim();
+    if (
+      !cleaned ||
+      /^显示器\s*\d+$/i.test(cleaned) ||
+      /^Generic PnP Monitor$/i.test(cleaned) ||
+      cleaned === "通用即插即用监视器"
+    ) {
+      return d.primary ? "主显示器" : `外接显示器 ${d.index}`;
+    }
+    return cleaned;
+  }, []);
+
+  const activeDisplayId = useMemo(() => {
+    if (displaysPayload?.current_display_id) {
+      return displaysPayload.current_display_id;
+    }
+    const cur = displays.find((d) => d.current) || displays[0];
+    return cur?.id ?? "";
+  }, [displays, displaysPayload?.current_display_id]);
+
+  const displayOptions = useMemo<MorphSelectOption[]>(
+    () =>
+      displays.map((d) => ({
+        value: d.id,
+        label: `屏幕 ${d.index} · ${formatCleanDisplayName(d)}`,
+        meta: `${d.width} × ${d.height}${d.primary ? " · 主屏" : ""}${
+          d.current ? " · 当前显示" : ""
+        }`,
+      })),
+    [displays, formatCleanDisplayName]
+  );
 
   useEffect(() => {
     if (!open) return;
@@ -300,8 +354,8 @@ export function SystemSettingsModal({
             >
               <TabsList aria-label="系统设置分类页签">
                 <TabsTrigger value="general">
-                  <Power size={14} />
-                  <span>开机自启</span>
+                  <SlidersHorizontal size={14} />
+                  <span>常规设置</span>
                 </TabsTrigger>
                 <TabsTrigger value="recording">
                   <Clock size={14} />
@@ -322,22 +376,181 @@ export function SystemSettingsModal({
                 </TabsTrigger>
               </TabsList>
 
-              {/* Tab 1: General & Auto-Start on Boot */}
+              {/* Tab 1: General & Display & Auto-Start */}
               <TabsContent value="general" className="system-settings-panel">
                 <div className="modal-form-stack">
                   <div className="settings-section-card">
                     <div className="settings-section-card__head">
-                      <Switch
-                        checked={currentEnabled}
-                        disabled={
-                          savingAutoStart ||
-                          autoStartStatus?.supported === false
-                        }
-                        onCheckedChange={(checked) => {
-                          void handleUpdateAutoStart(checked, currentMode);
-                        }}
-                        label="开机自动启动 FocusCamera"
-                      />
+                      <div className="display-card-title-row">
+                        <Monitor size={15} />
+                        <strong>监控大屏目标显示器</strong>
+                      </div>
+                      <div className="display-card-head-actions">
+                        <Badge
+                          tone={displays.length > 1 ? "info" : "neutral"}
+                          size="sm"
+                        >
+                          {displays.length > 1
+                            ? `已连接 ${displays.length} 台显示器`
+                            : "单屏模式"}
+                        </Badge>
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          size="sm"
+                          disabled={switchingDisplay}
+                          onClick={() => void onRefreshDisplays()}
+                          title="重新检测当前连接的显示器列表"
+                        >
+                          <RefreshCw size={13} />
+                          <span>刷新</span>
+                        </Button>
+                      </div>
+                    </div>
+
+                    {displays.length === 1 && !displaysPayload?.fallback_used && (
+                      <>
+                        <div className="display-single-strip">
+                          <div className="display-single-strip__left">
+                            <span
+                              className="display-status-dot"
+                              aria-hidden="true"
+                            />
+                            <strong className="display-single-strip__name">
+                              {formatCleanDisplayName(displays[0])}
+                            </strong>
+                            <span className="display-single-strip__res">
+                              {displays[0].width} × {displays[0].height}
+                            </span>
+                          </div>
+                          <Badge tone="success" size="sm">
+                            当前主屏
+                          </Badge>
+                        </div>
+                        <p className="settings-section-card__desc">
+                          接入第二台显示器或电视大屏后，可在此指定投放屏幕或直接跨屏拖拽窗口自动记忆。
+                        </p>
+                      </>
+                    )}
+
+                    {(displays.length > 1 ||
+                      Boolean(displaysPayload?.fallback_used)) && (
+                      <>
+                        <div
+                          className="display-monitor-grid"
+                          role="radiogroup"
+                          aria-label="选择监控大屏所在显示器"
+                        >
+                          {displays.map((d) => {
+                            const isCurrent =
+                              d.id === activeDisplayId || d.current;
+                            const isRemembered =
+                              Boolean(displaysPayload?.preferred_display_id) &&
+                              displaysPayload?.preferred_display_id === d.id;
+                            return (
+                              <button
+                                key={d.id}
+                                type="button"
+                                role="radio"
+                                aria-checked={isCurrent}
+                                disabled={switchingDisplay}
+                                className={`display-monitor-tile ${
+                                  isCurrent ? "display-monitor-tile--active" : ""
+                                }`}
+                                onClick={() => {
+                                  void onSelectDisplay(d.id);
+                                }}
+                              >
+                                <div className="display-monitor-tile__top">
+                                  <span className="display-monitor-tile__idx">
+                                    {isCurrent && (
+                                      <span
+                                        className="display-status-dot"
+                                        aria-hidden="true"
+                                      />
+                                    )}
+                                    <span>屏幕 {d.index}</span>
+                                  </span>
+                                  <div className="display-monitor-tile__badges">
+                                    {d.primary && !isCurrent && (
+                                      <Badge tone="neutral" size="sm">
+                                        主屏
+                                      </Badge>
+                                    )}
+                                    {isCurrent && (
+                                      <Badge tone="success" size="sm">
+                                        {d.primary ? "主屏 · 当前显示" : "当前显示"}
+                                      </Badge>
+                                    )}
+                                    {isRemembered && !isCurrent && (
+                                      <Badge tone="info" size="sm">
+                                        已记忆
+                                      </Badge>
+                                    )}
+                                  </div>
+                                </div>
+                                <strong className="display-monitor-tile__name">
+                                  {formatCleanDisplayName(d)}
+                                </strong>
+                                <span className="display-monitor-tile__res">
+                                  {d.width} × {d.height}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+
+                        {displayOptions.length > 2 && (
+                          <MorphSelect
+                            label="快速选择目标显示器"
+                            className="morph-select--field"
+                            items={displayOptions}
+                            value={activeDisplayId}
+                            disabled={switchingDisplay}
+                            searchable="auto"
+                            onValueChange={(nextId) => {
+                              if (nextId && nextId !== activeDisplayId) {
+                                void onSelectDisplay(nextId);
+                              }
+                            }}
+                          />
+                        )}
+
+                        {displaysPayload?.fallback_used && (
+                          <Alert
+                            tone="info"
+                            title="上次记忆的显示器当前未连接，已自动回退至默认主显示器"
+                          >
+                            重新接入原外接显示器后，大屏窗口将自动恢复到记忆的显示器。
+                          </Alert>
+                        )}
+
+                        <p className="settings-section-card__desc">
+                          点击选择后将自动记忆，下次打开默认展示到该显示器；直接用鼠标将窗口拖拽到其他显示器松手后也会自动铺满并记忆。
+                        </p>
+                      </>
+                    )}
+                  </div>
+
+                  <div className="settings-section-card">
+                    <div className="settings-section-card__head">
+                      <div className="display-card-title-row">
+                        <Power size={15} />
+                        <strong>开机自动启动 FocusCamera</strong>
+                      </div>
+                      <div className="display-card-head-actions">
+                        <Switch
+                          aria-label="开机自动启动 FocusCamera"
+                          checked={currentEnabled}
+                          disabled={
+                            savingAutoStart ||
+                            autoStartStatus?.supported === false
+                          }
+                          onCheckedChange={(checked) => {
+                            void handleUpdateAutoStart(checked, currentMode);
+                          }}
+                        />
+                      </div>
                     </div>
 
                     <div
@@ -386,19 +599,25 @@ export function SystemSettingsModal({
 
                   <div className="settings-section-card">
                     <div className="settings-section-card__head">
-                      <Switch
-                        checked={autoTimeSync}
-                        disabled={savingAutoStart}
-                        onCheckedChange={(checked) => {
-                          setAutoTimeSync(checked);
-                          void handleUpdateAutoStart(
-                            currentEnabled,
-                            currentMode,
-                            checked
-                          );
-                        }}
-                        label="启动时与后台每 6 小时自动校准全部摄像头时间"
-                      />
+                      <div className="display-card-title-row">
+                        <Clock size={15} />
+                        <strong>启动时与后台每 6 小时自动校准全部摄像头时间</strong>
+                      </div>
+                      <div className="display-card-head-actions">
+                        <Switch
+                          aria-label="启动时与后台每 6 小时自动校准全部摄像头时间"
+                          checked={autoTimeSync}
+                          disabled={savingAutoStart}
+                          onCheckedChange={(checked) => {
+                            setAutoTimeSync(checked);
+                            void handleUpdateAutoStart(
+                              currentEnabled,
+                              currentMode,
+                              checked
+                            );
+                          }}
+                        />
+                      </div>
                     </div>
                     <p className="settings-section-card__desc">
                       针对封闭局域网无互联网 NTP 或断电后硬件时钟归零的情况，自动把本机电脑当前时间写入全部在线摄像头的机身时钟，确保画面时间水印与录像时间轴一致。

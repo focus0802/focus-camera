@@ -141,9 +141,50 @@ static NSImage* createFocusCameraIcon(BOOL fullBleed) {
 @property (nonatomic, strong) FocusWebView *webView;
 @property (nonatomic, strong) NSStatusItem *statusItem;
 @property (nonatomic, copy) NSString *initialURL;
+@property (nonatomic, copy) NSString *preferredDisplayID;
+@property (nonatomic, copy) NSString *currentDisplayID;
+@property (nonatomic, assign) BOOL isProgrammaticMove;
+@property (nonatomic, assign) BOOL dragSnapPending;
 @property (nonatomic, assign) BOOL forceClose;
 @property (nonatomic, assign) BOOL startInTray;
 @end
+
+static FocusAppDelegate *g_appDelegate = nil;
+
+static NSString* displayIDForScreen(NSScreen *screen) {
+	if (!screen) return @"";
+	NSDictionary *desc = [screen deviceDescription];
+	NSNumber *num = [desc objectForKey:@"NSScreenNumber"];
+	if (!num) return @"";
+	return [NSString stringWithFormat:@"%u", [num unsignedIntValue]];
+}
+
+static NSString* nameForScreen(NSScreen *screen, NSUInteger index) {
+	if (screen && [screen respondsToSelector:@selector(localizedName)]) {
+		NSString *name = [screen localizedName];
+		if (name && [name length] > 0) {
+			return name;
+		}
+	}
+	return [NSString stringWithFormat:@"显示器 %lu", (unsigned long)(index + 1)];
+}
+
+static NSScreen* findScreenByDisplayID(NSString *targetID, BOOL *outFound) {
+	if (outFound) *outFound = NO;
+	NSArray<NSScreen *> *screens = [NSScreen screens];
+	if (!screens || [screens count] == 0) {
+		return [NSScreen mainScreen];
+	}
+	if (targetID && [targetID length] > 0) {
+		for (NSScreen *s in screens) {
+			if ([displayIDForScreen(s) isEqualToString:targetID]) {
+				if (outFound) *outFound = YES;
+				return s;
+			}
+		}
+	}
+	return [screens firstObject] ?: [NSScreen mainScreen];
+}
 
 @implementation FocusAppDelegate
 
@@ -211,10 +252,88 @@ static NSImage* createFocusCameraIcon(BOOL fullBleed) {
 
 - (void)restoreFromTray:(id)sender {
 	if (self.window) {
+		if (![self.window screen]) {
+			BOOL foundPref = NO;
+			NSScreen *target = findScreenByDisplayID(self.preferredDisplayID, &foundPref);
+			if (target) {
+				[self applyScreenFrame:target animate:NO notifyBackend:NO];
+			}
+		}
 		[self.window makeKeyAndOrderFront:nil];
 		[self.window syncTrafficLights];
 		[NSApp activateIgnoringOtherApps:YES];
 	}
+}
+
+- (void)notifyBackendDisplayRemembered:(NSString *)displayID {
+	if (!displayID || [displayID length] == 0 || !self.initialURL) return;
+	NSURL *baseURL = [NSURL URLWithString:self.initialURL];
+	if (!baseURL) return;
+	NSURLComponents *comp = [NSURLComponents componentsWithURL:baseURL resolvingAgainstBaseURL:NO];
+	[comp setPath:@"/api/displays/remember"];
+	[comp setQuery:nil];
+	NSURL *postURL = [comp URL];
+	if (!postURL) return;
+
+	NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:postURL];
+	[req setHTTPMethod:@"POST"];
+	[req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+	NSDictionary *payload = @{@"display_id": displayID};
+	NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
+	if (!body) return;
+	[req setHTTPBody:body];
+	NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {}];
+	[task resume];
+}
+
+- (void)applyScreenFrame:(NSScreen *)screen animate:(BOOL)animate notifyBackend:(BOOL)notifyBackend {
+	if (!self.window || !screen) return;
+	NSRect visible = [screen visibleFrame];
+	if (visible.size.width <= 0 || visible.size.height <= 0) return;
+	NSString *newID = displayIDForScreen(screen);
+	self.isProgrammaticMove = YES;
+	[self.window setMinSize:NSMakeSize(400, 300)];
+	[self.window setMaxSize:NSMakeSize(16384, 16384)];
+	[self.window setFrame:visible display:YES animate:animate];
+	[self.window setMinSize:visible.size];
+	[self.window setMaxSize:visible.size];
+	[self.window syncTrafficLights];
+	self.currentDisplayID = newID;
+	self.isProgrammaticMove = NO;
+	if (notifyBackend && newID.length > 0) {
+		self.preferredDisplayID = newID;
+		[self notifyBackendDisplayRemembered:newID];
+	}
+	if (self.webView) {
+		[self.webView evaluateJavaScript:@"window.dispatchEvent(new CustomEvent('focus-display-changed'));" completionHandler:nil];
+	}
+}
+
+- (void)scheduleSnapToCurrentScreen {
+	if (self.dragSnapPending || self.isProgrammaticMove || !self.window) return;
+	self.dragSnapPending = YES;
+	__weak typeof(self) weakSelf = self;
+	void (^ __block checkRelease)(void) = ^{
+		__strong typeof(weakSelf) strongSelf = weakSelf;
+		if (!strongSelf || !strongSelf.window) {
+			checkRelease = nil;
+			return;
+		}
+		if (([NSEvent pressedMouseButtons] & 1) != 0) {
+			dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(80 * NSEC_PER_MSEC)), dispatch_get_main_queue(), checkRelease);
+			return;
+		}
+		strongSelf.dragSnapPending = NO;
+		checkRelease = nil;
+		if (strongSelf.isProgrammaticMove) return;
+		if (([strongSelf.window styleMask] & NSWindowStyleMaskFullScreen) != 0) return;
+		NSScreen *curScreen = [strongSelf.window screen];
+		NSString *curID = displayIDForScreen(curScreen);
+		if (curScreen && curID.length > 0 && ![curID isEqualToString:strongSelf.currentDisplayID]) {
+			[strongSelf applyScreenFrame:curScreen animate:YES notifyBackend:YES];
+		}
+	};
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(80 * NSEC_PER_MSEC)), dispatch_get_main_queue(), checkRelease);
 }
 
 - (void)requestGracefulQuit:(id)sender {
@@ -264,30 +383,34 @@ static NSImage* createFocusCameraIcon(BOOL fullBleed) {
 	}
 	[self setupStatusBarTray:icon];
 
-	NSScreen *screen = [NSScreen mainScreen];
+	BOOL foundPreferred = NO;
+	NSScreen *screen = findScreenByDisplayID(self.preferredDisplayID, &foundPreferred);
 	NSRect visible = screen ? [screen visibleFrame] : NSMakeRect(0, 0, 1680, 980);
+	self.currentDisplayID = displayIDForScreen(screen);
 
 	NSWindowStyleMask style = NSWindowStyleMaskTitled |
 	                          NSWindowStyleMaskClosable |
 	                          NSWindowStyleMaskMiniaturizable |
 	                          NSWindowStyleMaskFullSizeContentView;
 
-	self.window = [[FocusWindow alloc] initWithContentRect:visible
+	self.isProgrammaticMove = YES;
+	self.window = [[FocusWindow alloc] initWithContentRect:NSMakeRect(0, 0, visible.size.width, visible.size.height)
 	                                             styleMask:style
 	                                               backing:NSBackingStoreBuffered
 	                                                 defer:NO];
+	[self.window setMinSize:visible.size];
+	[self.window setMaxSize:visible.size];
 	[self.window setFrame:visible display:YES];
 	[self.window setTitle:@"Focus Camera · 高清监控与 NVR 中心"];
 	[self.window setTitleVisibility:NSWindowTitleHidden];
 	[self.window setTitlebarAppearsTransparent:YES];
 	[self.window setMovable:YES];
 	[self.window setMovableByWindowBackground:NO];
-	[self.window setMinSize:visible.size];
-	[self.window setMaxSize:visible.size];
 	[[self.window standardWindowButton:NSWindowZoomButton] setEnabled:NO];
 	[self.window setAppearance:[NSAppearance appearanceNamed:NSAppearanceNameDarkAqua]];
 	[self.window setBackgroundColor:[NSColor colorWithSRGBRed:0.086 green:0.086 blue:0.086 alpha:1.0]];
 	[self.window setDelegate:self];
+	self.isProgrammaticMove = NO;
 
 	WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
 	config.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
@@ -339,6 +462,11 @@ static NSImage* createFocusCameraIcon(BOOL fullBleed) {
 		NSEvent *ev = self.webView.lastMouseDownEvent ?: [NSApp currentEvent];
 		if (ev && self.window) {
 			[self.window performWindowDragWithEvent:ev];
+			NSScreen *curScreen = [self.window screen];
+			NSString *curID = displayIDForScreen(curScreen);
+			if (curScreen && curID.length > 0 && ![curID isEqualToString:self.currentDisplayID]) {
+				[self scheduleSnapToCurrentScreen];
+			}
 		}
 	} else if ([action isEqualToString:@"zoom"]) {
 		if (self.window) {
@@ -367,6 +495,37 @@ static NSImage* createFocusCameraIcon(BOOL fullBleed) {
 
 - (void)windowDidResize:(NSNotification *)notification {
 	[self.window syncTrafficLights];
+}
+
+- (void)windowDidChangeScreen:(NSNotification *)notification {
+	if (self.isProgrammaticMove || !self.window) return;
+	NSScreen *curScreen = [self.window screen];
+	NSString *curID = displayIDForScreen(curScreen);
+	if (curScreen && curID.length > 0 && ![curID isEqualToString:self.currentDisplayID]) {
+		[self scheduleSnapToCurrentScreen];
+	}
+}
+
+- (void)windowDidMove:(NSNotification *)notification {
+	if (self.isProgrammaticMove || !self.window) return;
+	NSScreen *curScreen = [self.window screen];
+	NSString *curID = displayIDForScreen(curScreen);
+	if (curScreen && curID.length > 0 && ![curID isEqualToString:self.currentDisplayID]) {
+		[self scheduleSnapToCurrentScreen];
+	}
+}
+
+- (void)applicationDidChangeScreenParameters:(NSNotification *)notification {
+	if (!self.window || self.isProgrammaticMove) return;
+	if (([self.window styleMask] & NSWindowStyleMaskFullScreen) != 0) return;
+	BOOL foundPref = NO;
+	NSScreen *target = findScreenByDisplayID(self.preferredDisplayID, &foundPref);
+	if (!foundPref && [self.window screen]) {
+		target = [self.window screen];
+	}
+	if (target) {
+		[self applyScreenFrame:target animate:NO notifyBackend:NO];
+	}
 }
 
 - (void)windowDidBecomeKey:(NSNotification *)notification {
@@ -534,7 +693,7 @@ decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
 
 static int g_cocoaAppRunning = 0;
 
-static void runCocoaDesktopWindow(const char *cUrl, int startInTray) {
+static void runCocoaDesktopWindow(const char *cUrl, int startInTray, const char *cPreferredDisplayID) {
 	@autoreleasepool {
 		g_cocoaAppRunning = 1;
 		NSApplication *app = [NSApplication sharedApplication];
@@ -543,10 +702,92 @@ static void runCocoaDesktopWindow(const char *cUrl, int startInTray) {
 		FocusAppDelegate *delegate = [[FocusAppDelegate alloc] init];
 		delegate.initialURL = [NSString stringWithUTF8String:cUrl];
 		delegate.startInTray = (startInTray != 0);
+		if (cPreferredDisplayID != NULL && strlen(cPreferredDisplayID) > 0) {
+			delegate.preferredDisplayID = [NSString stringWithUTF8String:cPreferredDisplayID];
+		}
+		g_appDelegate = delegate;
 		[app setDelegate:delegate];
 
 		[app run];
 	}
+}
+
+static char* getMacOSDisplaysJSON(void) {
+	__block NSString *jsonStr = @"[]";
+	void (^collectBlock)(void) = ^{
+		NSArray<NSScreen *> *screens = [NSScreen screens];
+		if (!screens || [screens count] == 0) {
+			return;
+		}
+		NSScreen *winScreen = nil;
+		if (g_appDelegate && g_appDelegate.window) {
+			winScreen = [g_appDelegate.window screen];
+		}
+		if (!winScreen) {
+			winScreen = [screens firstObject] ?: [NSScreen mainScreen];
+		}
+		NSMutableArray *arr = [NSMutableArray arrayWithCapacity:[screens count]];
+		for (NSUInteger i = 0; i < [screens count]; i++) {
+			NSScreen *s = [screens objectAtIndex:i];
+			NSString *sid = displayIDForScreen(s);
+			NSString *sname = nameForScreen(s, i);
+			NSRect frame = [s frame];
+			NSRect vis = [s visibleFrame];
+			BOOL isPrimary = (i == 0);
+			BOOL isCurrent = (s == winScreen);
+			NSDictionary *item = @{
+				@"id": sid ?: @"",
+				@"name": sname ?: @"",
+				@"index": @(i + 1),
+				@"primary": @(isPrimary),
+				@"current": @(isCurrent),
+				@"width": @((int)round(frame.size.width)),
+				@"height": @((int)round(frame.size.height)),
+				@"work_x": @((int)round(vis.origin.x)),
+				@"work_y": @((int)round(vis.origin.y)),
+				@"work_w": @((int)round(vis.size.width)),
+				@"work_h": @((int)round(vis.size.height)),
+			};
+			[arr addObject:item];
+		}
+		NSData *data = [NSJSONSerialization dataWithJSONObject:arr options:0 error:nil];
+		if (data) {
+			NSString *str = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+			if (str) {
+				jsonStr = str;
+			}
+		}
+	};
+	if (g_cocoaAppRunning == 0 || [NSThread isMainThread]) {
+		collectBlock();
+	} else {
+		dispatch_sync(dispatch_get_main_queue(), collectBlock);
+	}
+	return strdup([jsonStr UTF8String]);
+}
+
+static char* moveMacOSWindowToDisplay(const char *cDisplayID) {
+	__block NSString *appliedID = @"";
+	NSString *targetID = (cDisplayID != NULL) ? [NSString stringWithUTF8String:cDisplayID] : @"";
+	void (^moveBlock)(void) = ^{
+		BOOL found = NO;
+		NSScreen *target = findScreenByDisplayID(targetID, &found);
+		if (target) {
+			appliedID = displayIDForScreen(target);
+			if (g_appDelegate) {
+				g_appDelegate.preferredDisplayID = appliedID;
+				if (g_appDelegate.window) {
+					[g_appDelegate applyScreenFrame:target animate:YES notifyBackend:NO];
+				}
+			}
+		}
+	};
+	if (g_cocoaAppRunning == 0 || [NSThread isMainThread]) {
+		moveBlock();
+	} else {
+		dispatch_sync(dispatch_get_main_queue(), moveBlock);
+	}
+	return strdup([appliedID UTF8String]);
 }
 
 static int isCocoaAppRunning(void) {
@@ -630,6 +871,7 @@ static char* selectMacOSExportFileDialog(const char *cDefaultName, const char *c
 */
 import "C"
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -638,14 +880,41 @@ import (
 	"unsafe"
 )
 
-func runNativeDesktopWindow(appURL string, startInTray bool) {
+func runNativeDesktopWindow(appURL string, startInTray bool, preferredDisplayID string) {
 	cStr := C.CString(appURL)
 	defer C.free(unsafe.Pointer(cStr))
+	cPref := C.CString(strings.TrimSpace(preferredDisplayID))
+	defer C.free(unsafe.Pointer(cPref))
 	trayFlag := C.int(0)
 	if startInTray {
 		trayFlag = C.int(1)
 	}
-	C.runCocoaDesktopWindow(cStr, trayFlag)
+	C.runCocoaDesktopWindow(cStr, trayFlag, cPref)
+}
+
+func listNativeDisplays() []DisplayInfo {
+	cJSON := C.getMacOSDisplaysJSON()
+	if cJSON == nil {
+		return []DisplayInfo{}
+	}
+	defer C.free(unsafe.Pointer(cJSON))
+	raw := C.GoString(cJSON)
+	var out []DisplayInfo
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return []DisplayInfo{}
+	}
+	return out
+}
+
+func moveNativeWindowToDisplay(displayID string) (string, error) {
+	cID := C.CString(strings.TrimSpace(displayID))
+	defer C.free(unsafe.Pointer(cID))
+	cApplied := C.moveMacOSWindowToDisplay(cID)
+	if cApplied == nil {
+		return "", nil
+	}
+	defer C.free(unsafe.Pointer(cApplied))
+	return strings.TrimSpace(C.GoString(cApplied)), nil
 }
 
 func selectNativeStorageFolder(initialDir string) (string, bool, error) {

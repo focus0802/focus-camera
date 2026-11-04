@@ -24,7 +24,7 @@ import (
 )
 
 // CurrentVersion is the current application version (can be overridden via -ldflags).
-var CurrentVersion = "v2.5.0"
+var CurrentVersion = "v2.6.0"
 
 // DefaultUpdateURL points to the official GitHub Releases endpoint for FocusCamera.
 const DefaultUpdateURL = "https://api.github.com/repos/focus0802/focus-camera/releases/latest"
